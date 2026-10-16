@@ -30,6 +30,43 @@ _DEEPFAKE_LLM = "deepfake_llm"
 _DEEPFAKE_VISION = "deepfake_vision"
 
 
+class TagStripper:
+    """Streaming XML-tag filter for non-forensic tasks.
+
+    The LR-fused base leaks template closers (</question>, </answer>) even
+    under a no-XML system prompt. Tags may split across token boundaries, so
+    a trailing partial tag (`<` + letters, no `>` yet) is held back until it
+    completes or is disproved. Plain-text uses of `<` (e.g. `a < b`) pass
+    through: only `<letter...>` shapes are treated as tags.
+    """
+
+    _TAG_RE = None
+
+    def __init__(self, max_carry: int = 32) -> None:
+        import re
+        if TagStripper._TAG_RE is None:
+            TagStripper._TAG_RE = re.compile(r"</?[A-Za-z][^<>]*>")
+        self._carry = ""
+        self._max_carry = max_carry
+
+    def feed(self, text: str) -> str:
+        data = self._carry + (text or "")
+        self._carry = ""
+        # Hold back a trailing partial tag.
+        lt = data.rfind("<")
+        if lt != -1 and ">" not in data[lt:]:
+            tail = data[lt:]
+            import re as _re
+            if _re.match(r"</?[A-Za-z]*$", tail) and len(tail) <= self._max_carry:
+                self._carry = tail
+                data = data[:lt]
+        return TagStripper._TAG_RE.sub("", data)
+
+    def flush(self) -> str:
+        tail, self._carry = self._carry, ""
+        return TagStripper._TAG_RE.sub("", tail)
+
+
 class AdapterService:
     def __init__(self, base_dir: str,
                  anomaly_dir: str,

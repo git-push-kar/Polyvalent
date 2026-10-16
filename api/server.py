@@ -271,6 +271,16 @@ def _chat_stream(req: ChatRequest):
         return
     log_record["selection"] = selection
 
+    # The forensic judge needs the pixels: text-only deepfake requests get a
+    # friendly ask-for-image instead of a base-model confabulation.
+    if decision.task == "deepfake" and "image_base64" not in payload:
+        _log_chat_run({**log_record, "outcome": "no-image"})
+        yield _sse({"event": "notice",
+                    "text": "Please attach the face image using the 📎 button "
+                            "and I'll examine whether it's real or fake."})
+        yield _sse({"event": "done"})
+        return
+
     # Quiet context: last turns travel as proper chat turns; the prompt is
     # rebuilt in the adapter's training-time framing (task system prompt +
     # fused chat template). Bare user text makes the LR-fused base fall back
@@ -285,6 +295,10 @@ def _chat_stream(req: ChatRequest):
     prompt = service.format_prompt(decision.task, norm_turns, req.message)
 
     # Tokens only — latencies stay in the server log, never on the wire.
+    # Non-forensic tasks get the streaming XML-tag filter (LR-prior template
+    # closers); deepfake keeps its trained <fast>/<answer>… format intact.
+    from router.adapter_service import TagStripper
+    scrub = None if decision.task == "deepfake" else TagStripper()
     gen_receipt: Dict[str, Any] = {}
     for chunk in service.stream(prompt,
                                 max_new_tokens=req.max_new_tokens,
@@ -292,9 +306,18 @@ def _chat_stream(req: ChatRequest):
                                 repetition_penalty=req.repetition_penalty,
                                 stub=req.stub):
         if chunk.get("event") == "token":
-            yield _sse({"event": "token", "text": chunk.get("text", "")})
+            text = chunk.get("text", "")
+            if scrub is not None:
+                text = scrub.feed(text)
+                if not text:
+                    continue
+            yield _sse({"event": "token", "text": text})
         elif chunk.get("event") == "generation_receipt":
             gen_receipt = chunk
+    if scrub is not None:
+        tail = scrub.flush()
+        if tail:
+            yield _sse({"event": "token", "text": tail})
     _log_chat_run({**log_record, "outcome": "answered",
                    "generation": gen_receipt})
     yield _sse({"event": "done"})

@@ -10,7 +10,8 @@ c = TestClient(srv.app)
 # End-user expectations: domain queries stream tokens; chit-chat is
 # answered by the base model (general); only sub-threshold garbage abstains.
 tests = [
-    ("Please tell me if this image is fake or real", {}, "token"),
+    # (message, extra, expected-first-event): text-only forensic asks for image
+    ("Please tell me if this image is fake or real", {}, "notice"),
     ("hi", {}, "token"),  # general -> base model greeting
     ("XMEAS_7 reactor pressure high, diagnose the fault", {}, "token"),
     ("is this face real or fake", {"image_base64": "AAAA"}, "token"),

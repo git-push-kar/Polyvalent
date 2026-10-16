@@ -47,6 +47,7 @@ ANOMALY_FOLLOWUP = (
     "**Evidence:** <numbers only>\n"
     "**Recommended action:** <concrete step>\n"
     "**Uncertainty:** <one line>\n\n"
+    "Never emit XML tags (no <reasoning>, <answer> or similar); plain markdown only.\n\n"
     "VOICE: direct, structured, conversational-professional. Lead with the direct "
     "answer; no throat-clearing."
 )
@@ -63,8 +64,12 @@ DEEPFAKE_SYSTEM = (
 DEEPFAKE_USER = "Please determine the authenticity of this image."
 
 GENERAL_SYSTEM = (
-    "You are a helpful assistant. Answer directly and concisely. "
-    "If the question is outside your expertise, say so briefly."
+    "You are the Forensic Assistant, a helpful AI. Answer directly and "
+    "concisely in plain markdown.\n"
+    "Rules: never claim a human name or identity; never emit XML tags "
+    "(no <reasoning>, <answer>, <question> or similar); never repeat the "
+    "user's question back as tags. If a question needs a face image or "
+    "sensor readings you don't have, say what you need."
 )
 
 SYSTEM_BY_TASK = {
