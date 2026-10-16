@@ -13,12 +13,21 @@ Steps instrumented separately for research comparison:
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional
 
 from .base import BaseRouter, RouterDecision
 from .latency import StepClock
 
-LAYA_MIN_CONFIDENCE = 0.65
+# Zero-shot Laya confidences on custom criteria land ~0.1-0.5 and jitter
+# run-to-run on identical input (e.g. anomaly text scored 0.13 / 0.22 /
+# 0.28 across runs — nondeterministic inference-side, plus uncalibrated
+# upstream temperatures, see load warning); fine-tuning raises them toward
+# ~0.7+. Default accepts the usable zero-shot band so valid domain queries
+# route; raise via env after fine-tuning. Env override: FINAL_LAYA_MIN_CONF.
+# Raw confidences are always logged (logs/chat_runs.jsonl, /route/compare),
+# so research numbers stay honest whatever the gate is.
+LAYA_MIN_CONFIDENCE = float(os.getenv("FINAL_LAYA_MIN_CONF", "0.10"))
 
 _CHOICE_QUESTION = {
     "task": {
@@ -91,21 +100,7 @@ class LayaRouter(BaseRouter):
         if self._router is not None:
             return True
         try:
-            # Hardening for CPU/Windows boxes where torch._inductor cannot
-            # import (stale triton): transformers' ModernBERT uses
-            # @torch.compile at class-definition time, which pulls inductor.
-            # Inductor is unusable there anyway -> eager fallback.
-            try:
-                import torch
-                try:
-                    import torch._inductor.runtime.hints  # noqa: F401
-                except Exception:
-                    def _eager_compile(model=None, *args, **kwargs):
-                        return (lambda m: m) if model is None else model
-
-                    torch.compile = _eager_compile
-            except ImportError:
-                pass
+            from . import _torch_shim  # noqa: F401  (eager fallback, Windows-CPU)
             from laya import Router  # lazy: static path never imports this
             kwargs: Dict[str, Any] = {"preload": True}
             if self._device:

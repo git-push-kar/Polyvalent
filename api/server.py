@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -45,7 +45,12 @@ app.mount("/ui", StaticFiles(directory=str(_REPO / "ui"), html=True),
 
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse(url="/ui/")
+    return RedirectResponse(url="/chat")
+
+
+@app.get("/chat", include_in_schema=False)
+def chat_page():
+    return FileResponse(str(_REPO / "ui" / "chat.html"))
 _STATIC = StaticRouter()
 _LAYA: Optional[LayaRouter] = None
 _SERVICE: Optional[AdapterService] = None
@@ -74,10 +79,10 @@ def get_service() -> AdapterService:
                                   str(_REPO / "adapters" / "Anomaly_adapter")),
             deepfake_llm_dir=os.getenv(
                 "FINAL_DEEPFAKE_LLM_DIR",
-                str(_REPO / "adapters" / "Deepfake_adapter" / "llm_adapter")),
+                str(_REPO / "adapters" / "Deepfake_adapter" / "llm_adapter_toplevel")),
             deepfake_vision_dir=os.getenv(
                 "FINAL_DEEPFAKE_VISION_DIR",
-                str(_REPO / "adapters" / "Deepfake_adapter" / "vision_adapter")),
+                str(_REPO / "adapters" / "Deepfake_adapter" / "vision_adapter_toplevel")),
             custom_heads_path=os.getenv(
                 "FINAL_CUSTOM_HEADS",
                 str(_REPO / "adapters" / "Deepfake_adapter" / "custom_heads"
@@ -91,6 +96,7 @@ class PredictRequest(BaseModel):
     prompt: str = ""
     max_new_tokens: int = 128
     temperature: float = 0.0
+    repetition_penalty: float = 1.0  # training-faithful default
     stub: Optional[bool] = None  # force stub stream (research/offline runs)
 
 
@@ -123,9 +129,14 @@ def _predict_stream(router_name: str, req: PredictRequest):
     yield _sse({"event": "selection_receipt", **selection})
 
     # Tokens flushed as they arrive — never one buffered print.
-    for chunk in service.stream(req.prompt or req.payload.get("text", ""),
+    # Prompt is rebuilt in the adapter's training-time framing (system +
+    # chat template); bare user text makes the LR-fused base emit rule traces.
+    task_prompt = service.format_prompt(
+        decision.task, [], req.prompt or req.payload.get("text", ""))
+    for chunk in service.stream(task_prompt,
                                 max_new_tokens=req.max_new_tokens,
                                 temperature=req.temperature,
+                                repetition_penalty=req.repetition_penalty,
                                 stub=req.stub):
         yield _sse(chunk)
     yield _sse({"event": "done"})
@@ -178,3 +189,118 @@ def stats() -> Dict[str, Any]:
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"status": "ok", "stub_generation": os.getenv("FINAL_STUB_GENERATION", "0")}
+
+
+# ---------------------------------------------------------------------
+# End-user chat: Laya-only routing, internals hidden.
+# The user types like ChatGPT; routing + latency stay server-side
+# (appended to logs/chat_runs.jsonl for research). The client only ever
+# sees: notice (optional) -> token... -> done. No receipts, no timings.
+# ---------------------------------------------------------------------
+
+class ChatTurn(BaseModel):
+    role: str = "user"
+    content: str = ""
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    history: list = Field(default_factory=list)  # [{role, content}], last 6 used
+    image_base64: Optional[str] = None  # attached image -> deepfake path
+    max_new_tokens: int = 128
+    temperature: float = 0.0
+    repetition_penalty: float = 1.1  # mild loop-breaker for chat
+    stub: Optional[bool] = None
+
+
+_CHAT_ABSTAIN_TEXT = (
+    "I couldn't tell which specialist your question needs. "
+    "Could you rephrase it — for example, mention whether it's about "
+    "a face image, sensor readings, or investments?"
+)
+_CHAT_UNAVAILABLE_TEXT = (
+    "That specialist is still being set up. Please try a question about "
+    "face-image forensics or sensor anomalies for now."
+)
+
+
+def _log_chat_run(record: Dict[str, Any]) -> None:
+    try:
+        logdir = _REPO / "logs"
+        logdir.mkdir(exist_ok=True)
+        with open(logdir / "chat_runs.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({**record, "ts": time.time()}) + "\n")
+    except Exception as exc:  # logging must never break chat
+        logger.warning("chat log failed: %s", exc)
+
+
+def _chat_stream(req: ChatRequest):
+    service = get_service()
+    payload: Dict[str, Any] = {"text": req.message}
+    if req.image_base64:
+        payload["image_base64"] = req.image_base64
+
+    # Laya only — no static path here by design.
+    decision = get_laya().route(payload)
+    _STATS["laya"]["n"] += 1
+    _STATS["laya"]["routing_ms"] += decision.latency_ms
+
+    log_record: Dict[str, Any] = {
+        "message": req.message,
+        "routing": decision.to_dict(),
+    }
+
+    if decision.abstained:
+        _log_chat_run({**log_record, "outcome": "abstained"})
+        yield _sse({"event": "notice", "text": _CHAT_ABSTAIN_TEXT})
+        yield _sse({"event": "done"})
+        return
+
+    try:
+        selection = service.select(decision.task)
+    except ValueError:
+        _log_chat_run({**log_record, "outcome": "bad-task"})
+        yield _sse({"event": "notice", "text": _CHAT_ABSTAIN_TEXT})
+        yield _sse({"event": "done"})
+        return
+    if selection.get("status") == 501:
+        _log_chat_run({**log_record, "outcome": "adapter-unavailable",
+                       "selection": selection})
+        yield _sse({"event": "notice", "text": _CHAT_UNAVAILABLE_TEXT})
+        yield _sse({"event": "done"})
+        return
+    log_record["selection"] = selection
+
+    # Quiet context: last turns travel as proper chat turns; the prompt is
+    # rebuilt in the adapter's training-time framing (task system prompt +
+    # fused chat template). Bare user text makes the LR-fused base fall back
+    # to logic-rule traces.
+    norm_turns = []
+    for t in (req.history or [])[-6:]:
+        if isinstance(t, ChatTurn):
+            t = t.dict()
+        if isinstance(t, dict) and t.get("content"):
+            norm_turns.append({"role": t.get("role", "user"),
+                               "content": t.get("content")})
+    prompt = service.format_prompt(decision.task, norm_turns, req.message)
+
+    # Tokens only — latencies stay in the server log, never on the wire.
+    gen_receipt: Dict[str, Any] = {}
+    for chunk in service.stream(prompt,
+                                max_new_tokens=req.max_new_tokens,
+                                temperature=req.temperature,
+                                repetition_penalty=req.repetition_penalty,
+                                stub=req.stub):
+        if chunk.get("event") == "token":
+            yield _sse({"event": "token", "text": chunk.get("text", "")})
+        elif chunk.get("event") == "generation_receipt":
+            gen_receipt = chunk
+    _log_chat_run({**log_record, "outcome": "answered",
+                   "generation": gen_receipt})
+    yield _sse({"event": "done"})
+
+
+@app.post("/chat/stream")
+def chat_stream(req: ChatRequest):
+    return StreamingResponse(_chat_stream(req),
+                             media_type="text/event-stream")

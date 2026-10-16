@@ -16,10 +16,12 @@ import logging
 import os
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, Generator, Optional
 
 from router.latency import GenerationReceipt, TokenStat
+from router.prompts import SYSTEM_BY_TASK, build_messages
 
 logger = logging.getLogger(__name__)
 
@@ -66,16 +68,19 @@ class AdapterService:
                         "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3)}
             raise
         if task == "anomaly":
-            self._model.set_adapter(_ANOMALY)
+            self._set_active([_ANOMALY])
             self._active = _ANOMALY
             names = [_ANOMALY]
         elif task == "deepfake":
-            self._model.set_adapter([_DEEPFAKE_LLM, _DEEPFAKE_VISION])
+            # peft 0.17: PeftModel.set_adapter is str-only, but tuner LAYERS
+            # accept lists and skip adapters absent from their own lora_A.
+            # llm <-> vision targets are disjoint, so both stay live at once.
+            self._set_active([_DEEPFAKE_LLM, _DEEPFAKE_VISION])
             self._load_heads_once()
             self._active = "deepfake"
             names = [_DEEPFAKE_LLM, _DEEPFAKE_VISION, "custom_heads"]
         elif task == "general":
-            self._model.disable_adapter_layers()
+            self._set_active([])  # base model, no adapter
             self._active = None
             names = ["base"]
         else:
@@ -83,9 +88,25 @@ class AdapterService:
         return {"task": task, "status": 200, "adapters": names,
                 "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3)}
 
+    def _set_active(self, names: list) -> None:
+        """Activate adapters per tuner layer (peft 0.17-compatible).
+
+        Layers ignore names missing from their own lora_A, so disjoint
+        adapters (llm vs vision) compose safely; [] = plain base model.
+        """
+        from peft.tuners.tuners_utils import BaseTunerLayer
+        for module in self._model.modules():
+            if isinstance(module, BaseTunerLayer) and hasattr(module, "lora_A"):
+                module.set_adapter([n for n in names if n in module.lora_A])
+        # Model-level tag is only used for config lookup (active_peft_config);
+        # it must name a LOADED adapter even when every layer runs bare.
+        self._model.active_adapter = (
+            names[0] if names else next(iter(self._model.peft_config)))
+
     def _ensure_model(self) -> None:
         if self._model is not None:
             return
+        import warnings
         from peft import PeftModel
         from transformers import AutoModel, AutoTokenizer
 
@@ -97,12 +118,28 @@ class AdapterService:
             self.base_dir, trust_remote_code=True,
             torch_dtype="auto", device_map="auto",
         )
-        model = PeftModel.from_pretrained(
-            base, self.deepfake_llm_dir,
-            adapter_name=_DEEPFAKE_LLM, is_trainable=False)
-        model.load_adapter(self.deepfake_vision_dir,
-                           adapter_name=_DEEPFAKE_VISION)
-        model.load_adapter(self.anomaly_dir, adapter_name=_ANOMALY)
+        # Required by InternVLChatModel.generate(): maps <IMG_CONTEXT> slots
+        # to vision embeddings. Must be set on the BASE model before wrapping
+        # (text-only calls pass pixel_values=None, so no slots are replaced).
+        try:
+            base.img_context_token_id = self._tokenizer.convert_tokens_to_ids(
+                "<IMG_CONTEXT>")
+        except Exception as exc:
+            logger.warning("could not set img_context_token_id: %s", exc)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model = PeftModel.from_pretrained(
+                base, self.deepfake_llm_dir,
+                adapter_name=_DEEPFAKE_LLM, is_trainable=False)
+            model.load_adapter(self.deepfake_vision_dir,
+                               adapter_name=_DEEPFAKE_VISION)
+            model.load_adapter(self.anomaly_dir, adapter_name=_ANOMALY)
+        missing = [str(w.message)[:160] for w in caught
+                   if "missing adapter keys" in str(w.message)]
+        if missing:
+            raise RuntimeError(
+                "adapter weights did not attach (key namespace mismatch): "
+                f"{missing[0]}... Refusing silent base-model generation.")
         model.eval()
         self._model = model
 
@@ -121,7 +158,7 @@ class AdapterService:
 
     # -- streaming generation ------------------------------------------
     def stream(self, prompt: str, max_new_tokens: int = 256,
-               temperature: float = 0.0,
+               temperature: float = 0.0, repetition_penalty: float = 1.0,
                stub: Optional[bool] = None) -> Generator[Dict[str, Any], None, None]:
         """Yield token events then a final generation receipt.
 
@@ -135,7 +172,8 @@ class AdapterService:
         if use_stub or self._model is None and self._stub_required():
             yield from self._stub_stream(prompt, max_new_tokens)
             return
-        yield from self._real_stream(prompt, max_new_tokens, temperature)
+        yield from self._real_stream(prompt, max_new_tokens, temperature,
+                                     repetition_penalty)
 
     def _stub_required(self) -> bool:
         try:
@@ -144,6 +182,55 @@ class AdapterService:
         except Exception as exc:  # weights/GPU absent: stub keeps shape testable
             logger.warning("model unavailable, stub stream: %s", exc)
             return True
+
+    def format_prompt(self, task: str, history: list, message: str) -> str:
+        """Training-faithful prompt via the fused tokenizer's own template.
+
+        Bare user text lets the LR-fused base fall back to its logic-rule
+        prior (rule traces, token loops). The adapters were trained under
+        <|im_start|>system framing — reproduce it here.
+        """
+        messages = build_messages(task, history or [], message)
+        try:
+            return self._tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True)
+        except Exception as exc:  # pragma: no cover - very old tokenizers
+            logger.warning("chat template failed, manual framing: %s", exc)
+            parts = []
+            for m in messages:
+                parts.append(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n")
+            parts.append("<|im_start|>assistant\n")
+            return "".join(parts)
+
+    def eos_ids(self) -> list:
+        ids = {self._tokenizer.eos_token_id}
+        try:
+            extra = self._tokenizer.convert_tokens_to_ids("<|im_end|>")
+            if isinstance(extra, int) and extra > 0:
+                ids.add(extra)
+        except Exception:
+            pass
+        return [i for i in ids if i]
+
+    def _generate_guarded(self, gen_kwargs: Dict[str, Any],
+                            streamer: Any) -> None:
+        """Run generate() off-thread; never leave the SSE iterator hanging.
+
+        On worker error the exception is logged and the streamer is ended so
+        the consumer sees ... + generation_receipt(partial) + done instead of
+        blocking forever.
+        """
+        try:
+            self._model.generate(**gen_kwargs)
+        except Exception as exc:
+            logger.warning("generation failed, ending stream: %s\n%s",
+                           exc, traceback.format_exc())
+            gen_kwargs["_worker_error"] = str(exc)
+        finally:
+            try:
+                streamer.end()
+            except Exception:
+                pass
 
     def _stub_stream(self, prompt: str,
                      max_new_tokens: int) -> Generator[Dict[str, Any], None, None]:
@@ -169,7 +256,8 @@ class AdapterService:
                                    per_token_ms=per_token).to_dict()}
 
     def _real_stream(self, prompt: str, max_new_tokens: int,
-                     temperature: float) -> Generator[Dict[str, Any], None, None]:
+                     temperature: float,
+                     repetition_penalty: float = 1.0) -> Generator[Dict[str, Any], None, None]:
         import torch
         from transformers import TextIteratorStreamer
 
@@ -182,11 +270,16 @@ class AdapterService:
             input_ids=input_ids, streamer=streamer,
             max_new_tokens=max_new_tokens,
             do_sample=temperature > 0,
-            temperature=max(temperature, 1e-6),
+            repetition_penalty=repetition_penalty,
+            eos_token_id=self.eos_ids(),
             pad_token_id=self._tokenizer.pad_token_id,
         )
+        if temperature > 0:
+            gen_kwargs["temperature"] = temperature
+            gen_kwargs["top_p"] = 0.9
         thread = threading.Thread(
-            target=lambda: self._model.generate(**gen_kwargs), daemon=True)
+            target=lambda: self._generate_guarded(gen_kwargs, streamer),
+            daemon=True)
         thread.start()
         prefill_ms = (time.perf_counter() - pre0) * 1000.0
         per_token: list = []
@@ -203,6 +296,10 @@ class AdapterService:
                    "elapsed_ms": round((now - t0) * 1000.0, 3)}
             idx += 1
         thread.join()
+        if gen_kwargs.get("_worker_error"):
+            yield {"event": "notice",
+                   "text": "Generation hit an error partway; showing what arrived. "
+                           f"Detail: {gen_kwargs['_worker_error'][:200]}"}
         total = (time.perf_counter() - t0) * 1000.0
         decode_ms = max(total - prefill_ms, 0.0)
         yield {"event": "generation_receipt",

@@ -19,11 +19,16 @@ for name, payload in cases.items():
     d = static.route(payload)
     print(f"[static/{name}]", json.dumps(d.to_dict()))
 
-# Laya without package installed -> explicit abstention, NO static fallback.
+# Laya path: may route or abstain depending on installed package +
+# confidence — either is fine. What must NEVER happen is static logic
+# leaking in (no modality=/keyword= reasons, no silent substitution).
 laya = LayaRouter()
 d = laya.route({"text": "XMEAS_7 pressure high"})
-print("[laya/sensor-no-pkg]", json.dumps(d.to_dict()))
-assert d.abstained and d.task == "needs_clarification", "laya must abstain, not fall back"
+print("[laya/sensor]", json.dumps(d.to_dict()))
+assert not d.reason.startswith(("modality=", "keyword=")), \
+    "laya must never fall back to static logic"
+if d.abstained:
+    assert d.reason.startswith("laya-"), d.reason
 
 # Streaming shape: routing_receipt -> selection -> tokens -> generation_receipt -> done
 from api.server import _predict_stream
