@@ -91,6 +91,21 @@ class LayaRouter(BaseRouter):
         if self._router is not None:
             return True
         try:
+            # Hardening for CPU/Windows boxes where torch._inductor cannot
+            # import (stale triton): transformers' ModernBERT uses
+            # @torch.compile at class-definition time, which pulls inductor.
+            # Inductor is unusable there anyway -> eager fallback.
+            try:
+                import torch
+                try:
+                    import torch._inductor.runtime.hints  # noqa: F401
+                except Exception:
+                    def _eager_compile(model=None, *args, **kwargs):
+                        return (lambda m: m) if model is None else model
+
+                    torch.compile = _eager_compile
+            except ImportError:
+                pass
             from laya import Router  # lazy: static path never imports this
             kwargs: Dict[str, Any] = {"preload": True}
             if self._device:
@@ -125,4 +140,4 @@ class LayaRouter(BaseRouter):
             # NO static fallback: explicit abstention keeps numbers attributable.
             return ("needs_clarification", conf,
                     f"laya-lowconf:{choice}@{conf:.2f}<{self.min_confidence}", True)
-        return (choice, conf, f"laya:{choice}")
+        return (choice, conf, f"laya:{choice}", False)
