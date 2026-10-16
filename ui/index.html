@@ -170,8 +170,12 @@ async function streamPredict(route, req, els) {
             task: ev.task, confidence: '', reason: 'adapters: ' + (ev.adapters || []).join(', ') + (ev.mode ? ' (' + ev.mode + ')' : ''),
             latency_ms: ev.latency_ms, steps: {}, abstained: false, extra: {} });
           if (ev.event === 'routing_receipt') els.receipt.innerHTML = receiptHTML(ev);
-        } else if (ev.event === 'token') {
-          els.answer.textContent += ev.text;
+        } else if (ev.event === 'verdict') {
+          els.receipt.innerHTML += `<div style="margin-top:6px;border:1px solid #8886;border-radius:6px;padding:6px 10px;">` +
+            `<b>VERDICT: ${ev.verdict}</b> (${(ev.confidence * 100).toFixed(1)}%)<br>` +
+            `hotspots: ${ev.hotspots || '—'}<br>spectral: ${ev.spectral || ''}<br>` +
+            `<span style="opacity:.7">telemetry ${ev.telemetry_ms} ms</span></div>`;
+        } else if (ev.event === 'token') {          els.answer.textContent += ev.text;
           maxTok = Math.max(maxTok, ev.latency_ms);
           const bar = document.createElement('div');
           bar.style.height = Math.max(4, 44 * ev.latency_ms / Math.max(maxTok, 0.01)) + 'px';

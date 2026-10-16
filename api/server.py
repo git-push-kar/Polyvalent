@@ -128,6 +128,25 @@ def _predict_stream(router_name: str, req: PredictRequest):
         return
     yield _sse({"event": "selection_receipt", **selection})
 
+    # Deepfake runs the dedicated forensic wrapper (classifier verdict +
+    # streamed reasoning) and needs pixels — never bare-text generation.
+    if decision.task == "deepfake":
+        import base64 as _b64
+        b64 = req.payload.get("image_base64")
+        if not b64:
+            yield _sse({"event": "notice",
+                        "text": "Deepfake analysis needs an image — "
+                                "attach one and ask again."})
+            yield _sse({"event": "done", "reason": "no-image"})
+            return
+        for chunk in service.analyze_image_stream(
+                _b64.b64decode(b64), max_new_tokens=req.max_new_tokens,
+                temperature=req.temperature,
+                repetition_penalty=req.repetition_penalty, stub=req.stub):
+            yield _sse(chunk)
+        yield _sse({"event": "done"})
+        return
+
     # Tokens flushed as they arrive — never one buffered print.
     # Prompt is rebuilt in the adapter's training-time framing (system +
     # chat template); bare user text makes the LR-fused base emit rule traces.
@@ -278,6 +297,33 @@ def _chat_stream(req: ChatRequest):
         yield _sse({"event": "notice",
                     "text": "Please attach the face image using the 📎 button "
                             "and I'll examine whether it's real or fake."})
+        yield _sse({"event": "done"})
+        return
+
+    # Deepfake runs the dedicated forensic wrapper (verdict + streamed
+    # reasoning) and needs pixels — handled before the text-token path below.
+    if decision.task == "deepfake":
+        import base64 as _b64
+        gen_receipt = {}
+        for chunk in service.analyze_image_stream(
+                _b64.b64decode(payload["image_base64"]),
+                max_new_tokens=req.max_new_tokens,
+                temperature=req.temperature,
+                repetition_penalty=req.repetition_penalty, stub=req.stub):
+            if chunk.get("event") == "verdict":
+                yield _sse({"event": "verdict", **{k: v for k, v in chunk.items()
+                                                   if k != "event"}})
+                log_record["verdict"] = chunk
+            elif chunk.get("event") == "token":
+                text = chunk.get("text", "")
+                # Forensic XML tags are the trained format — keep verbatim.
+                yield _sse({"event": "token", "text": text})
+            elif chunk.get("event") == "notice":
+                yield _sse({"event": "notice", "text": chunk.get("text", "")})
+            elif chunk.get("event") == "generation_receipt":
+                gen_receipt = chunk
+        _log_chat_run({**log_record, "outcome": "answered",
+                       "generation": gen_receipt})
         yield _sse({"event": "done"})
         return
 

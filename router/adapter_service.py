@@ -18,7 +18,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Dict, Generator, Optional, Tuple
 
 from router.latency import GenerationReceipt, TokenStat
 from router.prompts import SYSTEM_BY_TASK, build_messages
@@ -75,13 +75,19 @@ class AdapterService:
                  custom_heads_path: Optional[str] = None) -> None:
         self.base_dir = base_dir
         self.anomaly_dir = anomaly_dir
+        # Top-level PeftModel carries the ANOMALY adapter only. Deepfake owns
+        # a dedicated DeepfakeReasoningModel wrapper (own backbone instance)
+        # because its LoRA was trained submodule-relative and its classifier
+        # heads have no counterpart on raw InternVL. Kept dirs below point at
+        # the toplevel re-keyed copies for research A/B via the raw path.
         self.deepfake_llm_dir = deepfake_llm_dir
         self.deepfake_vision_dir = deepfake_vision_dir
         self.custom_heads_path = custom_heads_path
         self._model = None
         self._tokenizer = None
         self._active: Optional[str] = None
-        self._heads_loaded = False
+        self._deepfake = None          # (wrapper, tokenizer)
+        self._deepfake_origin_dirs: Optional[Tuple[str, str]] = None
 
     # -- adapter selection --------------------------------------------
     def select(self, task: str) -> Dict[str, Any]:
@@ -98,7 +104,7 @@ class AdapterService:
                 logger.warning("model unavailable, stub selection: %s", exc)
                 names = {"anomaly": [_ANOMALY],
                          "deepfake": [_DEEPFAKE_LLM, _DEEPFAKE_VISION,
-                                      "custom_heads"],
+                                      "custom_heads(wrapper)"],
                          "general": ["base"]}[task]
                 return {"task": task, "status": 200, "adapters": names,
                         "mode": "stub",
@@ -109,15 +115,15 @@ class AdapterService:
             self._active = _ANOMALY
             names = [_ANOMALY]
         elif task == "deepfake":
-            # peft 0.17: PeftModel.set_adapter is str-only, but tuner LAYERS
-            # accept lists and skip adapters absent from their own lora_A.
-            # llm <-> vision targets are disjoint, so both stay live at once.
-            self._set_active([_DEEPFAKE_LLM, _DEEPFAKE_VISION])
-            self._load_heads_once()
+            # Dedicated wrapper owns deepfake end-to-end (own backbone +
+            # submodule LoRA + classifier heads). Top model idles on base.
+            self._set_active([])
+            self._ensure_deepfake()
             self._active = "deepfake"
-            names = [_DEEPFAKE_LLM, _DEEPFAKE_VISION, "custom_heads"]
+            names = ["deepfake_llm(wrapper)", "deepfake_vision(wrapper)",
+                     "custom_heads(wrapper)"]
         elif task == "general":
-            self._set_active([])  # base model, no adapter
+            self._set_active([])  # plain base model
             self._active = None
             names = ["base"]
         else:
@@ -141,6 +147,8 @@ class AdapterService:
             names[0] if names else next(iter(self._model.peft_config)))
 
     def _ensure_model(self) -> None:
+        """Top-level PeftModel carries the ANOMALY adapter only (verified
+        namespace). Deepfake lives in its dedicated wrapper; general is bare."""
         if self._model is not None:
             return
         import warnings
@@ -166,11 +174,8 @@ class AdapterService:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             model = PeftModel.from_pretrained(
-                base, self.deepfake_llm_dir,
-                adapter_name=_DEEPFAKE_LLM, is_trainable=False)
-            model.load_adapter(self.deepfake_vision_dir,
-                               adapter_name=_DEEPFAKE_VISION)
-            model.load_adapter(self.anomaly_dir, adapter_name=_ANOMALY)
+                base, self.anomaly_dir,
+                adapter_name=_ANOMALY, is_trainable=False)
         missing = [str(w.message)[:160] for w in caught
                    if "missing adapter keys" in str(w.message)]
         if missing:
@@ -180,17 +185,176 @@ class AdapterService:
         model.eval()
         self._model = model
 
-    def _load_heads_once(self) -> None:
-        if self._heads_loaded or not self.custom_heads_path:
+    def _ensure_deepfake(self):
+        """Dedicated DeepfakeReasoningModel wrapper (own backbone instance).
+
+        Loads the ORIGINAL submodule-relative LoRA safetensors (the training
+        harness wrapped backbone.language_model / .vision_model directly) +
+        the 59 custom-head tensors. Any unmapped key raises — never silent.
+        """
+        if self._deepfake is not None:
+            return self._deepfake
+        import torch
+        from deepfake.loader import load_trained_wrapper
+
+        # Resolve relative to this repo regardless of CWD.
+        from pathlib import Path as _P
+        repo = _P(__file__).resolve().parent.parent
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._deepfake = load_trained_wrapper(
+            base_dir=self.base_dir,
+            llm_adapter_path=str(repo / "adapters" / "Deepfake_adapter" / "llm_adapter"),
+            vision_adapter_path=str(repo / "adapters" / "Deepfake_adapter" / "vision_adapter"),
+            heads_path=self.custom_heads_path
+            or str(repo / "adapters" / "Deepfake_adapter" / "custom_heads"
+                   / "custom_heads.safetensors"),
+            device=device,
+        )
+        self._deepfake_origin_dirs = ("llm_adapter", "vision_adapter")
+        return self._deepfake
+
+    # -- deepfake forensic analysis (wrapper path) -------------------------
+    def analyze_image_stream(self, image_bytes: bytes, max_new_tokens: int = 512,
+                             temperature: float = 0.0,
+                             repetition_penalty: float = 1.05,
+                             stub: Optional[bool] = None) -> Generator[Dict[str, Any], None, None]:
+        """Full forensic pass: classifier verdict first, then streamed reasoning.
+
+        Event shapes:
+          {"event": "verdict", "verdict": "REAL"|"FAKE", "confidence": f,
+           "hotspots": str, "spectral": str, "telemetry_ms": ms}
+          {"event": "token", ...}  (reasoning, as it generates)
+          {"event": "generation_receipt", ...}
+        """
+        import io as _io
+        use_stub = (os.getenv("FINAL_STUB_GENERATION", "0") == "1"
+                    if stub is None else stub)
+        if use_stub:
+            yield {"event": "verdict", "verdict": "REAL", "confidence": 0.5,
+                   "hotspots": "stub", "spectral": "stub",
+                   "telemetry_ms": 0.0, "mode": "stub"}
+            yield from self._stub_stream("stub forensic reasoning", max_new_tokens)
             return
-        from safetensors.torch import load_file as _load
-        heads = _load(self.custom_heads_path, device="cpu")
-        base_keys = set(self._model.get_base_model().state_dict().keys())
-        overlap = base_keys.intersection(heads.keys())
-        assert not overlap, (
-            f"custom_heads overwrite backbone keys: {sorted(overlap)[:5]}; "
-            "refusing to contaminate shared base (rename to extra modules)")
-        self._model.load_state_dict(heads, strict=False)
+        import torch
+        from PIL import Image as _Image
+        from transformers import TextIteratorStreamer
+
+        from deepfake.forensics import (build_telemetry_prompt,
+                                        extract_forensic_telemetry,
+                                        preprocess_image)
+        wrapper, tokenizer = self._ensure_deepfake()
+        device = next(wrapper.parameters()).device
+        try:
+            img = _Image.open(_io.BytesIO(image_bytes)).convert("RGB")
+            img.load()
+        except Exception:
+            yield {"event": "notice",
+                   "text": "That file doesn't look like an image I can read. "
+                           "Please attach a JPG or PNG face photo and ask again."}
+            return
+        pv, freq = preprocess_image(img, device=str(device))
+
+        t_tele = time.perf_counter()
+        with torch.no_grad():
+            _vis = wrapper._get_vision_features(pv, return_attn_weights=True)
+            cls_token, pooled, _patches, attn_w = _vis
+            freq_emb = wrapper.freq_branch(freq.to(device))
+            _dt = wrapper.cls_head.net[0].weight.dtype
+            vis_cat = torch.cat([cls_token.to(_dt), pooled.to(_dt),
+                                 freq_emb.to(_dt)], dim=-1)
+            logits = wrapper.cls_head(vis_cat)
+            probs = torch.softmax(logits.float(), dim=-1)
+            pred = int(logits.argmax(-1).item())
+            conf = float(probs[0, pred].item())
+        telemetry = extract_forensic_telemetry(pred, conf, freq, attn_w)
+        telemetry_ms = (time.perf_counter() - t_tele) * 1000.0
+        yield {"event": "verdict", "verdict": telemetry["verdict"],
+               "confidence": round(conf, 4),
+               "hotspots": telemetry["regions"],
+               "spectral": telemetry["spectral_desc"],
+               "telemetry_ms": round(telemetry_ms, 1)}
+        prompt_text = build_telemetry_prompt(telemetry)
+
+        # Reasoning generation with token streaming (mirrors predict()).
+        vis_tokens = wrapper._get_native_visual_tokens(pv)
+        inputs_embeds = vis_tokens.to(torch.bfloat16)
+        prompt_ids = tokenizer(prompt_text, return_tensors="pt",
+                               add_special_tokens=False).input_ids.to(device)
+        prompt_embeds = wrapper.backbone.language_model.get_input_embeddings()(prompt_ids)
+        inputs_embeds = torch.cat([inputs_embeds,
+                                   prompt_embeds.to(inputs_embeds.dtype)], dim=1)
+        attention_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.long,
+                                    device=device)
+        try:
+            from transformers import StoppingCriteria, StoppingCriteriaList
+            stop_ids = tokenizer("</answer>", add_special_tokens=False).input_ids
+
+            class _StopOnAnswer(StoppingCriteria):
+                def __call__(self, input_ids, scores, **kwargs):
+                    tail = input_ids[0, -len(stop_ids):].tolist()
+                    return tail == stop_ids
+
+            stopping = StoppingCriteriaList([_StopOnAnswer()])
+        except Exception:
+            stopping = None
+        streamer = TextIteratorStreamer(tokenizer, skip_special_tokens=True)
+        gen_kwargs: Dict[str, Any] = dict(
+            inputs_embeds=inputs_embeds, attention_mask=attention_mask,
+            streamer=streamer, max_new_tokens=max_new_tokens,
+            do_sample=temperature > 0,
+            repetition_penalty=repetition_penalty, use_cache=True,
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            stopping_criteria=stopping,
+        )
+        if temperature > 0:
+            gen_kwargs["temperature"] = temperature
+            gen_kwargs["top_p"] = 0.9
+        t0 = time.perf_counter()
+        pre0 = time.perf_counter()
+        thread = threading.Thread(
+            target=lambda: self._generate_guarded_lm(wrapper, gen_kwargs, streamer),
+            daemon=True)
+        thread.start()
+        prefill_ms = (time.perf_counter() - pre0) * 1000.0
+        per_token: list = []
+        idx = 0
+        prev = time.perf_counter()
+        for chunk in streamer:
+            now = time.perf_counter()
+            dt = (now - prev) * 1000.0
+            prev = now
+            per_token.append(dt)
+            yield {"event": "token", "index": idx, "text": chunk,
+                   "latency_ms": round(dt, 3),
+                   "elapsed_ms": round((now - t0) * 1000.0, 3)}
+            idx += 1
+        thread.join()
+        if gen_kwargs.get("_worker_error"):
+            yield {"event": "notice",
+                   "text": "Reasoning hit an error partway; verdict above stands. "
+                           f"Detail: {gen_kwargs['_worker_error'][:200]}"}
+        total = (time.perf_counter() - t0) * 1000.0
+        decode_ms = max(total - prefill_ms, 0.0)
+        yield {"event": "generation_receipt",
+               **GenerationReceipt(prefill_ms=prefill_ms, decode_ms=decode_ms,
+                                   tokens=idx,
+                                   tok_per_s=idx / max(decode_ms / 1000.0, 1e-9),
+                                   per_token_ms=per_token).to_dict()}
+
+    def _generate_guarded_lm(self, wrapper, gen_kwargs: Dict[str, Any],
+                             streamer: Any) -> None:
+        try:
+            wrapper.backbone.language_model.generate(**gen_kwargs)
+        except Exception as exc:
+            logger.warning("deepfake reasoning failed, ending stream: %s\n%s",
+                           exc, traceback.format_exc())
+            gen_kwargs["_worker_error"] = str(exc)
+        finally:
+            try:
+                streamer.end()
+            except Exception:
+                pass
         self._heads_loaded = True
 
     # -- streaming generation ------------------------------------------
