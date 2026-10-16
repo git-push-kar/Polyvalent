@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from router import AdapterService, LayaRouter, StaticRouter
@@ -38,6 +39,13 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Dual-Route Forensic Service", version="0.1.0")
 
 _REPO = Path(__file__).resolve().parent.parent
+app.mount("/ui", StaticFiles(directory=str(_REPO / "ui"), html=True),
+          name="ui")
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/ui/")
 _STATIC = StaticRouter()
 _LAYA: Optional[LayaRouter] = None
 _SERVICE: Optional[AdapterService] = None

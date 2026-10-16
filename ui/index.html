@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dual-Route Forensic Service — static vs laya</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0 16px 64px; max-width: 1180px; }
+  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  .tabs button { padding: 8px 18px; margin-right: 6px; cursor: pointer; border: 1px solid #888; background: none; border-radius: 6px 6px 0 0; font-size: 15px; }
+  .tabs button.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .card { border: 1px solid #8885; border-radius: 8px; padding: 12px 14px; margin-top: 12px; }
+  textarea, input[type=text], input[type=number] { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; }
+  label { font-size: 13px; font-weight: 600; display: block; margin: 10px 0 4px; }
+  .row { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 140px; }
+  button.run { background: #16a34a; color: #fff; border: none; border-radius: 6px; padding: 10px 26px; font-size: 15px; cursor: pointer; }
+  button.run:disabled { opacity: .5; cursor: wait; }
+  table.steps { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 6px; }
+  table.steps td, table.steps th { border: 1px solid #8884; padding: 3px 8px; text-align: left; }
+  table.steps td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .answer { white-space: pre-wrap; min-height: 80px; border: 1px dashed #8886; border-radius: 6px; padding: 10px; margin-top: 8px; }
+  .cursor::after { content: "▍"; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 13px; font-weight: 700; }
+  .agree { background: #dcfce7; color: #166534; } .disagree { background: #fee2e2; color: #991b1b; }
+  .abstain { background: #fef3c7; color: #92400e; }
+  .tokbar { display: flex; align-items: flex-end; gap: 1px; height: 48px; margin-top: 8px; overflow-x: auto; }
+  .tokbar div { background: #2563eb; min-width: 4px; opacity: .75; }
+  .mono { font-family: ui-monospace, monospace; font-size: 13px; }
+  footer { margin-top: 24px; font-size: 12px; opacity: .7; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Dual-Route Forensic Service</h1>
+  <span class="mono">static (rules) vs laya (System-1) — separate access, per-step latency, token streaming</span>
+</header>
+
+<div class="tabs">
+  <button data-tab="static" class="active">Static route</button>
+  <button data-tab="laya">Laya route</button>
+  <button data-tab="compare">Compare</button>
+</div>
+
+<section id="tab-static" class="tabpanel">
+  <div class="card">
+    <h3>Input → <span class="mono">POST /route/static/predict</span> (SSE)</h3>
+    <label>Text / prompt</label>
+    <textarea id="s-text" rows="3" placeholder="e.g. XMEAS_7 pressure high, XMV_3 stuck"></textarea>
+    <label>52-float sensor vector (optional, comma/space separated — routes to anomaly)</label>
+    <textarea id="s-values" rows="2" placeholder="0.1, 0.2, ... (exactly 52 numbers)"></textarea>
+    <label>Image (optional — routes to deepfake)</label>
+    <input type="file" id="s-image" accept="image/*">
+    <label>Portfolio JSON (optional — routes to portfolio stub)</label>
+    <textarea id="s-portfolio" rows="2" placeholder='{"holdings": {"AAPL": 10}}'></textarea>
+    <div class="row">
+      <div><label>max_new_tokens</label><input type="number" id="s-maxtok" value="128" min="1" max="512"></div>
+      <div><label>stub generation (offline)</label><input type="checkbox" id="s-stub"></div>
+      <div><label>&nbsp;</label><button class="run" id="s-run">Run static → stream</button></div>
+    </div>
+  </div>
+  <div class="card"><h3>Routing receipt</h3><div id="s-receipt" class="mono">—</div></div>
+  <div class="card"><h3>Answer (streams token-by-token, never buffered)</h3><div id="s-answer" class="answer"></div>
+    <div class="tokbar" id="s-tokbar"></div><div id="s-gen" class="mono"></div></div>
+</section>
+
+<section id="tab-laya" class="tabpanel" hidden>
+  <div class="card">
+    <h3>Input → <span class="mono">POST /route/laya/predict</span> (SSE, standalone — no static fallback)</h3>
+    <label>Text / prompt</label>
+    <textarea id="l-text" rows="3" placeholder="e.g. is this face real or fake?"></textarea>
+    <label>52-float sensor vector (optional)</label>
+    <textarea id="l-values" rows="2"></textarea>
+    <label>Image (optional)</label>
+    <input type="file" id="l-image" accept="image/*">
+    <div class="row">
+      <div><label>max_new_tokens</label><input type="number" id="l-maxtok" value="128" min="1" max="512"></div>
+      <div><label>stub generation (offline)</label><input type="checkbox" id="l-stub"></div>
+      <div><label>&nbsp;</label><button class="run" id="l-run">Run laya → stream</button></div>
+    </div>
+  </div>
+  <div class="card"><h3>Routing receipt</h3><div id="l-receipt" class="mono">—</div></div>
+  <div class="card"><h3>Answer (streams token-by-token)</h3><div id="l-answer" class="answer"></div>
+    <div class="tokbar" id="l-tokbar"></div><div id="l-gen" class="mono"></div></div>
+</section>
+
+<section id="tab-compare" class="tabpanel" hidden>
+  <div class="card">
+    <h3>Input → <span class="mono">POST /route/compare</span> (both routers, no generation)</h3>
+    <label>Text / prompt</label>
+    <textarea id="c-text" rows="3"></textarea>
+    <label>52-float sensor vector (optional)</label>
+    <textarea id="c-values" rows="2"></textarea>
+    <div class="row"><div><label>&nbsp;</label><button class="run" id="c-run">Compare routers</button></div></div>
+  </div>
+  <div class="grid">
+    <div class="card"><h3>Static receipt</h3><div id="c-static" class="mono">—</div></div>
+    <div class="card"><h3>Laya receipt</h3><div id="c-laya" class="mono">—</div></div>
+  </div>
+  <div class="card"><h3>Agreement</h3><div id="c-agree">—</div></div>
+</section>
+
+<footer>Each token is flushed to the page as its SSE event arrives. Routing + per-token latencies come from the server receipts, not client timers.</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tabs button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  document.querySelectorAll('.tabpanel').forEach(p => p.hidden = true);
+  $('tab-' + b.dataset.tab).hidden = false;
+});
+
+function readFileAsB64(input) {
+  return new Promise(res => {
+    if (!input.files || !input.files[0]) return res(null);
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(',')[1]);
+    r.readAsDataURL(input.files[0]);
+  });
+}
+function parseValues(text) {
+  text = (text || '').trim();
+  if (!text) return null;
+  const nums = text.split(/[\s,]+/).map(Number);
+  return (nums.length && nums.every(isFinite)) ? nums : null;
+}
+function stepsTable(steps) {
+  if (!steps) return '';
+  const rows = Object.entries(steps).map(([k, v]) =>
+    `<tr><td>${k}</td><td class="num">${Number(v).toFixed(3)} ms</td></tr>`).join('');
+  return `<table class="steps"><tr><th>step</th><th>latency</th></tr>${rows}</table>`;
+}
+function receiptHTML(d) {
+  const abst = d.abstained ? ' <span class="badge abstain">ABSTAINED</span>' : '';
+  return `<div>task=<b>${d.task}</b> conf=${d.confidence} total=${d.latency_ms} ms${abst}<br>` +
+    `<span>reason: ${d.reason}</span>` +
+    (d.extra && d.extra.laya_model ? `<br><span>laya_model: ${d.extra.laya_model}</span>` : '') +
+    `</div>` + stepsTable(d.steps);
+}
+
+async function streamPredict(route, req, els) {
+  const btn = els.btn; btn.disabled = true;
+  els.answer.textContent = ''; els.answer.classList.add('cursor');
+  els.tokbar.innerHTML = ''; els.gen.textContent = ''; els.receipt.textContent = '…';
+  try {
+    const resp = await fetch(`/route/${route}/predict`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(req)
+    });
+    if (!resp.ok || !resp.body) { els.receipt.textContent = `HTTP ${resp.status}`; return; }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '', maxTok = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n\n'); buf = parts.pop();
+      for (const p of parts) {
+        const line = p.trim().split('\n').find(l => l.startsWith('data:'));
+        if (!line) continue;
+        const ev = JSON.parse(line.slice(5));
+        if (ev.event === 'routing_receipt' || ev.event === 'selection_receipt') {
+          els.receipt.innerHTML = receiptHTML(ev.event === 'routing_receipt' ? ev : {
+            task: ev.task, confidence: '', reason: 'adapters: ' + (ev.adapters || []).join(', ') + (ev.mode ? ' (' + ev.mode + ')' : ''),
+            latency_ms: ev.latency_ms, steps: {}, abstained: false, extra: {} });
+          if (ev.event === 'routing_receipt') els.receipt.innerHTML = receiptHTML(ev);
+        } else if (ev.event === 'token') {
+          els.answer.textContent += ev.text;
+          maxTok = Math.max(maxTok, ev.latency_ms);
+          const bar = document.createElement('div');
+          bar.style.height = Math.max(4, 44 * ev.latency_ms / Math.max(maxTok, 0.01)) + 'px';
+          bar.title = `token ${ev.index}: ${ev.latency_ms} ms`;
+          els.tokbar.appendChild(bar);
+          els.gen.textContent = `token ${ev.index} +${ev.latency_ms} ms (elapsed ${ev.elapsed_ms} ms)`;
+        } else if (ev.event === 'generation_receipt') {
+          els.gen.textContent = `done: ${ev.tokens} tokens, prefill ${ev.prefill_ms} ms, decode ${ev.decode_ms} ms, ${ev.tok_per_s} tok/s`;
+        } else if (ev.event === 'done') {
+          els.gen.textContent += ` [${ev.reason || 'complete'}]`;
+        }
+      }
+    }
+  } finally { btn.disabled = false; els.answer.classList.remove('cursor'); }
+}
+
+async function buildReq(prefix) {
+  const payload = {};
+  const text = $(prefix + '-text').value.trim();
+  if (text) payload.text = text;
+  const vals = parseValues($(prefix + '-values').value);
+  if (vals) payload.values = vals;
+  const img = await readFileAsB64($(prefix + '-image'));
+  if (img) payload.image_base64 = img;
+  const pf = $(prefix + '-portfolio');
+  if (pf && pf.value.trim()) { try { Object.assign(payload, JSON.parse(pf.value)); } catch { payload.text = (payload.text || '') + ' ' + pf.value; } }
+  return {
+    payload,
+    prompt: text || 'summarise the routed analysis',
+    max_new_tokens: Number($(prefix + '-maxtok').value) || 128,
+    temperature: 0.0,
+    stub: $(prefix + '-stub').checked || null
+  };
+}
+
+$('s-run').onclick = async () => streamPredict('static', await buildReq('s'),
+  { btn: $('s-run'), receipt: $('s-receipt'), answer: $('s-answer'), tokbar: $('s-tokbar'), gen: $('s-gen') });
+$('l-run').onclick = async () => streamPredict('laya', await buildReq('l'),
+  { btn: $('l-run'), receipt: $('l-receipt'), answer: $('l-answer'), tokbar: $('l-tokbar'), gen: $('l-gen') });
+
+$('c-run').onclick = async () => {
+  const btn = $('c-run'); btn.disabled = true;
+  try {
+    const payload = {};
+    const text = $('c-text').value.trim();
+    if (text) payload.text = text;
+    const vals = parseValues($('c-values').value);
+    if (vals) payload.values = vals;
+    const resp = await fetch('/route/compare', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const out = await resp.json();
+    $('c-static').innerHTML = receiptHTML(out.static);
+    $('c-laya').innerHTML = receiptHTML(out.laya);
+    $('c-agree').innerHTML = out.agreement
+      ? '<span class="badge agree">AGREE</span>'
+      : '<span class="badge disagree">DISAGREE</span>';
+  } finally { btn.disabled = false; }
+};
+</script>
+</body>
+</html>
