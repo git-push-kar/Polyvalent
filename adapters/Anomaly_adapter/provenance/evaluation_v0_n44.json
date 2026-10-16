@@ -1,0 +1,416 @@
+{
+  "top_k": 3,
+  "samples": "llm",
+  "large_test_per_fault": null,
+  "metrics": {
+    "n_samples": 44,
+    "root_cause_accuracy": 0.1590909090909091,
+    "fault_classification_accuracy": 1.0,
+    "severity_accuracy": 1.0,
+    "evidence_consistency": 1.0,
+    "hallucination_rate": 0.0,
+    "hedged_reasoning_rate": 0.6136363636363636,
+    "recommendation_rate": 1.0,
+    "json_validity_rate": 1.0,
+    "overclaiming_rate": 0.0
+  },
+  "detail": [
+    {
+      "fault_id": 1,
+      "fault_name": "A/C feed ratio step change",
+      "root_cause": "A_C_Feed_Flow disturbance",
+      "affected_subsystem": "feed_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 1,
+      "fault_name": "A/C feed ratio step change",
+      "root_cause": "A_C_Feed_Flow disturbance",
+      "affected_subsystem": "feed_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 2,
+      "fault_name": "B composition step change",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "feed_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 2,
+      "fault_name": "B composition step change",
+      "root_cause": "Fault 1",
+      "affected_subsystem": "feed_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 3,
+      "fault_name": "D feed temperature step change",
+      "root_cause": "Feed Stream 2 disturbance",
+      "affected_subsystem": "reactor_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 3,
+      "fault_name": "D feed temperature step change",
+      "root_cause": "Feed Stream 2 disturbance",
+      "affected_subsystem": "reactor_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 4,
+      "fault_name": "Reactor cooling water inlet temperature step",
+      "root_cause": "Fault 14",
+      "affected_subsystem": "reactor_cooling_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 4,
+      "fault_name": "Reactor cooling water inlet temperature step",
+      "root_cause": "Fault 14",
+      "affected_subsystem": "reactor_cooling_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 5,
+      "fault_name": "Condenser cooling water inlet temperature step",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "condenser_cooling_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 5,
+      "fault_name": "Condenser cooling water inlet temperature step",
+      "root_cause": "Condenser_Cooling_Water_Flow",
+      "affected_subsystem": "condenser_cooling_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 6,
+      "fault_name": "A feed loss (stream 1)",
+      "root_cause": "A_Feed_Flow",
+      "affected_subsystem": "feed_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 6,
+      "fault_name": "A feed loss (stream 1)",
+      "root_cause": "A_Feed_Flow",
+      "affected_subsystem": "feed_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 7,
+      "fault_name": "C header pressure loss (reduced availability)",
+      "root_cause": "A_C_Feed_Flow disturbance",
+      "affected_subsystem": "feed_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 7,
+      "fault_name": "C header pressure loss (reduced availability)",
+      "root_cause": "A_C_Feed_Flow disturbance",
+      "affected_subsystem": "feed_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 8,
+      "fault_name": "A, B, C feed composition random variation",
+      "root_cause": "Feed Ratio/Composition Step Change",
+      "affected_subsystem": "feed_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 8,
+      "fault_name": "A, B, C feed composition random variation",
+      "root_cause": "Feed Ratio/Composition Step Change",
+      "affected_subsystem": "feed_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 9,
+      "fault_name": "D feed temperature random variation",
+      "root_cause": "Feed Stream 2 disturbance",
+      "affected_subsystem": "reactor_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 9,
+      "fault_name": "D feed temperature random variation",
+      "root_cause": "Feed Stream 2 disturbance",
+      "affected_subsystem": "reactor_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 10,
+      "fault_name": "C feed temperature random variation",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "feed_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 10,
+      "fault_name": "C feed temperature random variation",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "feed_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 11,
+      "fault_name": "Reactor cooling water inlet temperature random variation",
+      "root_cause": "Fault 14",
+      "affected_subsystem": "reactor_cooling_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 11,
+      "fault_name": "Reactor cooling water inlet temperature random variation",
+      "root_cause": "Fault 14",
+      "affected_subsystem": "reactor_cooling_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 12,
+      "fault_name": "Condenser cooling water inlet temperature random variation",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "condenser_cooling_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 12,
+      "fault_name": "Condenser cooling water inlet temperature random variation",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "condenser_cooling_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 13,
+      "fault_name": "Reaction kinetics slow drift",
+      "root_cause": "Fault 13",
+      "affected_subsystem": "reactor_system",
+      "severity": "low",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 13,
+      "fault_name": "Reaction kinetics slow drift",
+      "root_cause": "Fault 13",
+      "affected_subsystem": "reactor_system",
+      "severity": "low",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 14,
+      "fault_name": "Reactor cooling water valve sticking",
+      "root_cause": "Fault 14",
+      "affected_subsystem": "reactor_cooling_system",
+      "severity": "critical",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 14,
+      "fault_name": "Reactor cooling water valve sticking",
+      "root_cause": "Fault 14",
+      "affected_subsystem": "reactor_cooling_system",
+      "severity": "critical",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 15,
+      "fault_name": "Condenser cooling water valve sticking",
+      "root_cause": "Condenser_Cooling_Water_Flow",
+      "affected_subsystem": "condenser_cooling_system",
+      "severity": "critical",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 15,
+      "fault_name": "Condenser cooling water valve sticking",
+      "root_cause": "Condenser_Cooling_Water_Flow",
+      "affected_subsystem": "condenser_cooling_system",
+      "severity": "critical",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 16,
+      "fault_name": "Unknown disturbance in separation/reactor system",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "separation_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 16,
+      "fault_name": "Unknown disturbance in separation/reactor system",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "separation_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 17,
+      "fault_name": "Unknown disturbance in reactor/feed system",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "reactor_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 17,
+      "fault_name": "Unknown disturbance in reactor/feed system",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "reactor_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 18,
+      "fault_name": "Unknown disturbance in reactor thermal loop",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "reactor_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 18,
+      "fault_name": "Unknown disturbance in reactor thermal loop",
+      "root_cause": "Fault 16",
+      "affected_subsystem": "reactor_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 19,
+      "fault_name": "Unknown disturbance in separation condenser loop",
+      "root_cause": "Separator_Pressure increase",
+      "affected_subsystem": "condenser_cooling_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 19,
+      "fault_name": "Unknown disturbance in separation condenser loop",
+      "root_cause": "Separator_Pressure increase",
+      "affected_subsystem": "condenser_cooling_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 20,
+      "fault_name": "Unknown disturbance in feed composition",
+      "root_cause": "Feed composition disturbance",
+      "affected_subsystem": "feed_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 20,
+      "fault_name": "Unknown disturbance in feed composition",
+      "root_cause": "Feed composition disturbance",
+      "affected_subsystem": "feed_system",
+      "severity": "medium",
+      "confidence": 0.85,
+      "parsed": true
+    },
+    {
+      "fault_id": 21,
+      "fault_name": "Valve position stuck (stream 4 feed valve)",
+      "root_cause": "A_C_Feed_Flow disturbance",
+      "affected_subsystem": "feed_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 21,
+      "fault_name": "Valve position stuck (stream 4 feed valve)",
+      "root_cause": "A_C_Feed_Flow disturbance",
+      "affected_subsystem": "feed_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 22,
+      "fault_name": "Valve position stuck (stream 2 D feed valve)",
+      "root_cause": "Feed Flow Reduction",
+      "affected_subsystem": "feed_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    },
+    {
+      "fault_id": 22,
+      "fault_name": "Valve position stuck (stream 2 D feed valve)",
+      "root_cause": "Feed Flow Reduction",
+      "affected_subsystem": "feed_system",
+      "severity": "high",
+      "confidence": 0.9,
+      "parsed": true
+    }
+  ],
+  "counts": {}
+}

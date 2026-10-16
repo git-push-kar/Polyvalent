@@ -1,0 +1,96 @@
+# ── final/ deployment repo ──────────────────────────────────────
+# Tracks: adapter configs, provenance JSONs/YAMLs, guides, reference snippets.
+# Ignores: large weight binaries (distribute via HF Releases / separate store),
+# logs, caches, venvs, OS/IDE noise.
+#
+# NOTE: *.safetensors / models/ files already present locally stay on disk;
+# this file only stops them from being committed. If you DO want weights in
+# git, remove the weight rules below and use Git LFS instead:
+#   git lfs install; git lfs track "*.safetensors" "models/**"
+
+# ── Model + adapter weights (large binaries — do NOT commit) ───────────
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# ── Provenance: keep small JSONs/YAMLs, drop any accidental dumps ───────
+# (tokenizer.json ~7MB is intentionally TRACKED as parity proof)
+adapters/**/dataset_dict*.jsonl
+adapters/**/*.jsonl
+adapters/**/*.arrow
+adapters/**/*.parquet
+adapters/**/*.log
+adapters/**/*.err
+
+# ── Python ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.pyo
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+*.whl
+pip-log.txt
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# ── HF / inference caches ───────────────────────────────────────────────
+.cache/
+hf_cache/
+transformers_cache/
+.huggingface/
+checkpoints/
+outputs/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# ── Logs ────────────────────────────────────────────────────────────────
+*.log
+*.err
+logs/
+wandb/
+mlruns/
+lightning_logs/
+
+# ── Jupyter / testing ───────────────────────────────────────────────────
+.ipynb_checkpoints
+*.ipynb
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ── OS / IDE ────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# ── Secrets ─────────────────────────────────────────────────────────────
+.env.local
+.env.*.local
+secrets.yaml
+secrets.json
