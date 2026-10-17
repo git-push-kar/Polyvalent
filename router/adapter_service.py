@@ -67,6 +67,100 @@ class TagStripper:
         return TagStripper._TAG_RE.sub("", tail)
 
 
+class TagSectioner:
+    """Streaming section router for the forensic wrapper's tagged reasoning.
+
+    The trained forensic LM emits
+    `<fast>/<planning>/<reasoning>/<reflection>/<conclusion>/<answer>`
+    sections. Everything except `<answer>` streams on the ``thinking`` channel
+    (rendered collapsed, ChatGPT-style); `<answer>` streams on ``answer``.
+    Unknown tags are dropped (name only) and never leak. Tags may split across
+    token boundaries, so a trailing partial tag is held back until it completes
+    or is disproved.
+
+    `feed()` / `flush()` return ``[(channel, text), ...]`` with channel in
+    ``{"thinking", "answer"}``. Accumulated ``answer`` / ``conclusion`` text is
+    exposed for post-stream fallbacks.
+    """
+
+    _THINKING = ("fast", "planning", "reasoning", "reflection", "conclusion")
+
+    def __init__(self, default: str = "answer", max_carry: int = 48) -> None:
+        import re
+        self._re = re.compile(r"</?([A-Za-z][\w.-]*)[^<>]*>")
+        self._partial_re = re.compile(r"</?[A-Za-z][\w.-]*$")
+        self._default = default
+        self._section: Optional[str] = None
+        self._carry = ""
+        self._max_carry = max_carry
+        self.answer_text: list = []
+        self.conclusion_text: list = []
+
+    def _channel(self) -> str:
+        if self._section in self._THINKING:
+            return "thinking"
+        if self._section == "answer":
+            return "answer"
+        return self._default
+
+    def _push(self, text: str, out: list) -> None:
+        if not text:
+            return
+        channel = self._channel()
+        if self._section is None and not text.strip():
+            return  # whitespace between sections — never the answer
+        if channel == "answer":
+            self.answer_text.append(text)
+        if self._section == "conclusion":
+            self.conclusion_text.append(text)
+        out.append((channel, text))
+
+    def feed(self, text: str) -> list:
+        data = self._carry + (text or "")
+        self._carry = ""
+        out: list = []
+        while data:
+            lt = data.find("<")
+            if lt == -1:
+                self._push(data, out)
+                break
+            if lt > 0:
+                self._push(data[:lt], out)
+                data = data[lt:]
+            gt = data.find(">")
+            if gt == -1:  # partial tag: hold if plausible, else emit "<"
+                if len(data) <= self._max_carry and self._partial_re.match(data):
+                    self._carry = data
+                    break
+                self._push("<", out)
+                data = data[1:]
+                continue
+            tag = data[:gt + 1]
+            m = self._re.match(tag)
+            if m:
+                name = m.group(1).lower()
+                closing = tag.startswith("</")
+                if name in self._THINKING or name == "answer":
+                    self._section = None if closing else name
+                # unknown tags are dropped (name + attrs), never leaked
+            else:
+                self._push("<", out)  # literal "<" (e.g. "a < b>")
+                data = data[1:]
+                continue
+            data = data[gt + 1:]
+        return out
+
+    def flush(self) -> list:
+        data, self._carry = self._carry, ""
+        if not data:
+            return []
+        if self._partial_re.match(data):
+            return []  # truncated tag at stream end
+        out: list = []
+        self._push(data, out)
+        return out
+
+
 class AdapterService:
     def __init__(self, base_dir: str,
                  anomaly_dir: str,
@@ -217,14 +311,15 @@ class AdapterService:
         """Full forensic pass: classifier verdict first, then streamed reasoning.
 
         The trained forensic LM emits <fast>/<planning>/<reasoning>/<reflection>/
-        <conclusion>/<answer> XML tags. They are dropped from the token stream
-        (reasoning text kept) via a streaming tag filter, so callers never have
-        to post-process the tags.
+        <conclusion>/<answer> XML tags. A streaming section router sends the
+        reasoning sections on the "thinking" channel (rendered collapsed by the
+        client) and <answer> on the "token" channel, so callers never see tags.
 
         Event shapes:
           {"event": "verdict", "verdict": "REAL"|"FAKE", "confidence": f,
            "hotspots": str, "spectral": str, "telemetry_ms": ms}
-          {"event": "token", ...}  (reasoning, tags stripped, as it generates)
+          {"event": "thinking", ...}  (fast/planning/reasoning/reflection/conclusion)
+          {"event": "token", ...}     (the <answer> text, as it generates)
           {"event": "generation_receipt", ...}
         """
         import io as _io
@@ -320,25 +415,32 @@ class AdapterService:
         prefill_ms = (time.perf_counter() - pre0) * 1000.0
         per_token: list = []
         idx = 0
-        scrub = TagStripper()
+        sectioner = TagSectioner(default="answer")
         prev = time.perf_counter()
         for chunk in streamer:
             now = time.perf_counter()
             dt = (now - prev) * 1000.0
             prev = now
             per_token.append(dt)
-            text = scrub.feed(chunk)
-            if text:
-                yield {"event": "token", "index": idx, "text": text,
+            idx += 1
+            for channel, text in sectioner.feed(chunk):
+                yield {"event": "thinking" if channel == "thinking" else "token",
+                       "index": idx, "text": text,
                        "latency_ms": round(dt, 3),
                        "elapsed_ms": round((now - t0) * 1000.0, 3)}
-            idx += 1
         thread.join()
-        tail = scrub.flush()  # release any partial-tag carry
-        if tail:
-            yield {"event": "token", "index": idx, "text": tail,
-                   "latency_ms": 0.0,
-                   "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 3)}
+        elapsed = round((time.perf_counter() - t0) * 1000.0, 3)
+        for channel, text in sectioner.flush():  # release any partial-tag carry
+            yield {"event": "thinking" if channel == "thinking" else "token",
+                   "index": idx, "text": text, "latency_ms": 0.0,
+                   "elapsed_ms": elapsed}
+        # If the run stopped before <answer> (budget/stop), surface the
+        # conclusion as the answer so the client never shows an empty reply.
+        if not sectioner.answer_text:
+            fallback = "".join(sectioner.conclusion_text).strip()
+            if fallback:
+                yield {"event": "token", "index": idx, "text": fallback,
+                       "latency_ms": 0.0, "elapsed_ms": elapsed}
         if gen_kwargs.get("_worker_error"):
             yield {"event": "notice",
                    "text": "Reasoning hit an error partway; verdict above stands. "

@@ -13,6 +13,7 @@ SSE stream shape (text/event-stream, one JSON per `data:` line):
   {"event": "selection_receipt", ...}          # adapter hot-swap timing
   {"event": "token", "index": i, "text": tok,  # flushed as each token arrives
    "latency_ms": ms-this-token, "elapsed_ms": ms-since-gen-start}
+  {"event": "thinking", "text": tok}           # deepfake reasoning (collapsed)
   {"event": "generation_receipt", ...}         # prefill/decode/tok-per-s/per-token
   {"event": "done"}
 
@@ -92,7 +93,7 @@ def get_service() -> AdapterService:
 class PredictRequest(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
     prompt: str = ""
-    max_new_tokens: int = 128
+    max_new_tokens: int = 512
     temperature: float = 0.0
     repetition_penalty: float = 1.0  # training-faithful default
     stub: Optional[bool] = None  # force stub stream (research/offline runs)
@@ -207,7 +208,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     history: list = Field(default_factory=list)  # [{role, content}], last 6 used
     image_base64: Optional[str] = None  # attached image -> deepfake path
-    max_new_tokens: int = 128
+    max_new_tokens: int = 768  # room for fast+planning+reasoning+conclusion+answer
     temperature: float = 0.0
     repetition_penalty: float = 1.1  # mild loop-breaker for chat
     stub: Optional[bool] = None
@@ -295,9 +296,13 @@ def _chat_stream(req: ChatRequest):
                 yield _sse({"event": "verdict", **{k: v for k, v in chunk.items()
                                                    if k != "event"}})
                 log_record["verdict"] = chunk
+            elif chunk.get("event") == "thinking":
+                # analyze_image_stream routes the reasoning sections here
+                # (<fast>/<planning>/<reasoning>/<reflection>/<conclusion>);
+                # the client collapses them under a "Reasoning" disclosure.
+                yield _sse({"event": "thinking", "text": chunk.get("text", "")})
             elif chunk.get("event") == "token":
-                # analyze_image_stream already drops the trained XML tags
-                # (<fast>/<planning>/<reasoning>/<answer>…) and keeps the text.
+                # The <answer> section — the visible forensic reply.
                 yield _sse({"event": "token", "text": chunk.get("text", "")})
             elif chunk.get("event") == "notice":
                 yield _sse({"event": "notice", "text": chunk.get("text", "")})
