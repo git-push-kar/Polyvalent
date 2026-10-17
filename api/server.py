@@ -1,12 +1,12 @@
-"""Dual-routing API: separate access per router, token-streamed answers.
+"""Laya-routed API: one decision model, token-streamed answers.
+
+Laya is the sole router (the rule-based static router was removed by
+design). It picks either a specialist adapter or the plain base model.
 
 Endpoints:
-  POST /route/static/predict  — static router -> adapter -> SSE token stream
-  POST /route/laya/predict    — laya router (standalone, NO static fallback) -> SSE
-  POST /route/compare         — both routers on the same payload (no generation):
-                               decisions + per-step latencies + agreement
-  GET  /route/stats           — rolling per-router counters (research)
-  GET  /health                 — service health
+  POST /route/laya/predict    — Laya router (standalone, no substitution) -> SSE
+  GET  /route/stats           — rolling Laya routing counters (research)
+  GET  /health                — service health
 
 SSE stream shape (text/event-stream, one JSON per `data:` line):
   {"event": "routing_receipt", ...RouterDecision.to_dict()}
@@ -33,10 +33,11 @@ from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from router import AdapterService, LayaRouter, StaticRouter
+from router import AdapterService, LayaRouter
+from router.adapter_service import TagStripper
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="Dual-Route Forensic Service", version="0.1.0")
+app = FastAPI(title="Laya Forensic Service", version="0.2.0")
 
 _REPO = Path(__file__).resolve().parent.parent
 app.mount("/ui", StaticFiles(directory=str(_REPO / "ui"), html=True),
@@ -51,14 +52,11 @@ def root():
 @app.get("/chat", include_in_schema=False)
 def chat_page():
     return FileResponse(str(_REPO / "ui" / "chat.html"))
-_STATIC = StaticRouter()
 _LAYA: Optional[LayaRouter] = None
 _SERVICE: Optional[AdapterService] = None
 
 _STATS: Dict[str, Dict[str, float]] = {
-    "static": {"n": 0, "routing_ms": 0.0},
     "laya": {"n": 0, "routing_ms": 0.0},
-    "compare": {"n": 0, "agree": 0},
 }
 
 
@@ -104,12 +102,11 @@ def _sse(event: Dict[str, Any]) -> str:
     return "data: " + json.dumps(event) + "\n\n"
 
 
-def _predict_stream(router_name: str, req: PredictRequest):
-    router = _STATIC if router_name == "static" else get_laya()
+def _predict_stream(req: PredictRequest):
     service = get_service()
 
-    decision = router.route(req.payload)
-    st = _STATS[router_name]
+    decision = get_laya().route(req.payload)
+    st = _STATS["laya"]
     st["n"] += 1
     st["routing_ms"] += decision.latency_ms
     yield _sse({"event": "routing_receipt", **decision.to_dict()})
@@ -150,58 +147,42 @@ def _predict_stream(router_name: str, req: PredictRequest):
     # Tokens flushed as they arrive — never one buffered print.
     # Prompt is rebuilt in the adapter's training-time framing (system +
     # chat template); bare user text makes the LR-fused base emit rule traces.
+    # The LR-fused base also leaks template closers under this prompt, so the
+    # stream passes through the XML-tag filter (tags dropped, text kept).
     task_prompt = service.format_prompt(
         decision.task, [], req.prompt or req.payload.get("text", ""))
+    scrub = TagStripper()
     for chunk in service.stream(task_prompt,
                                 max_new_tokens=req.max_new_tokens,
                                 temperature=req.temperature,
                                 repetition_penalty=req.repetition_penalty,
                                 stub=req.stub):
-        yield _sse(chunk)
+        if chunk.get("event") == "token":
+            text = scrub.feed(chunk.get("text", ""))
+            if not text:
+                continue
+            yield _sse({**chunk, "text": text})
+        else:
+            yield _sse(chunk)
+    tail = scrub.flush()
+    if tail:
+        yield _sse({"event": "token", "text": tail})
     yield _sse({"event": "done"})
-
-
-@app.post("/route/static/predict")
-def static_predict(req: PredictRequest):
-    return StreamingResponse(_predict_stream("static", req),
-                             media_type="text/event-stream")
 
 
 @app.post("/route/laya/predict")
 def laya_predict(req: PredictRequest):
-    return StreamingResponse(_predict_stream("laya", req),
+    return StreamingResponse(_predict_stream(req),
                              media_type="text/event-stream")
-
-
-@app.post("/route/compare")
-def compare(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Run BOTH routers on the same payload (no generation)."""
-    s = _STATIC.route(payload)
-    l = get_laya().route(payload)
-    _STATS["static"]["n"] += 1
-    _STATS["static"]["routing_ms"] += s.latency_ms
-    _STATS["laya"]["n"] += 1
-    _STATS["laya"]["routing_ms"] += l.latency_ms
-    agree = (s.task == l.task)
-    _STATS["compare"]["n"] += 1
-    _STATS["compare"]["agree"] += 1 if agree else 0
-    return {
-        "static": s.to_dict(),
-        "laya": l.to_dict(),
-        "agreement": agree,
-    }
 
 
 @app.get("/route/stats")
 def stats() -> Dict[str, Any]:
     out: Dict[str, Any] = {}
-    for name in ("static", "laya"):
-        n = _STATS[name]["n"]
-        out[name] = {"n": int(n),
-                     "mean_routing_ms": round(_STATS[name]["routing_ms"] / max(n, 1), 3)}
-    n = _STATS["compare"]["n"]
-    out["compare"] = {"n": int(n),
-                      "agreement_rate": round(_STATS["compare"]["agree"] / max(n, 1), 4)}
+    n = _STATS["laya"]["n"]
+    out["laya"] = {"n": int(n),
+                   "mean_routing_ms": round(
+                       _STATS["laya"]["routing_ms"] / max(n, 1), 3)}
     return out
 
 
@@ -259,7 +240,7 @@ def _chat_stream(req: ChatRequest):
     if req.image_base64:
         payload["image_base64"] = req.image_base64
 
-    # Laya only — no static path here by design.
+    # Laya only — it is the sole router by design.
     decision = get_laya().route(payload)
     _STATS["laya"]["n"] += 1
     _STATS["laya"]["routing_ms"] += decision.latency_ms
@@ -315,9 +296,9 @@ def _chat_stream(req: ChatRequest):
                                                    if k != "event"}})
                 log_record["verdict"] = chunk
             elif chunk.get("event") == "token":
-                text = chunk.get("text", "")
-                # Forensic XML tags are the trained format — keep verbatim.
-                yield _sse({"event": "token", "text": text})
+                # analyze_image_stream already drops the trained XML tags
+                # (<fast>/<planning>/<reasoning>/<answer>…) and keeps the text.
+                yield _sse({"event": "token", "text": chunk.get("text", "")})
             elif chunk.get("event") == "notice":
                 yield _sse({"event": "notice", "text": chunk.get("text", "")})
             elif chunk.get("event") == "generation_receipt":
@@ -341,10 +322,10 @@ def _chat_stream(req: ChatRequest):
     prompt = service.format_prompt(decision.task, norm_turns, req.message)
 
     # Tokens only — latencies stay in the server log, never on the wire.
-    # Non-forensic tasks get the streaming XML-tag filter (LR-prior template
-    # closers); deepfake keeps its trained <fast>/<answer>… format intact.
-    from router.adapter_service import TagStripper
-    scrub = None if decision.task == "deepfake" else TagStripper()
+    # Every task runs the streaming XML-tag filter: tags are dropped, the
+    # reasoning text is kept (the LR-fused base leaks template closers, and
+    # the forensic LM emits <fast>/<planning>/…/<answer> by training design).
+    scrub = TagStripper()
     gen_receipt: Dict[str, Any] = {}
     for chunk in service.stream(prompt,
                                 max_new_tokens=req.max_new_tokens,
@@ -352,18 +333,15 @@ def _chat_stream(req: ChatRequest):
                                 repetition_penalty=req.repetition_penalty,
                                 stub=req.stub):
         if chunk.get("event") == "token":
-            text = chunk.get("text", "")
-            if scrub is not None:
-                text = scrub.feed(text)
-                if not text:
-                    continue
+            text = scrub.feed(chunk.get("text", ""))
+            if not text:
+                continue
             yield _sse({"event": "token", "text": text})
         elif chunk.get("event") == "generation_receipt":
             gen_receipt = chunk
-    if scrub is not None:
-        tail = scrub.flush()
-        if tail:
-            yield _sse({"event": "token", "text": tail})
+    tail = scrub.flush()
+    if tail:
+        yield _sse({"event": "token", "text": tail})
     _log_chat_run({**log_record, "outcome": "answered",
                    "generation": gen_receipt})
     yield _sse({"event": "done"})

@@ -14,7 +14,7 @@ PORTFOLIO_STUB = True
 
 @dataclass
 class RouterDecision:
-    router: str  # "static" | "laya"
+    router: str  # "laya" (sole router; static rules were removed)
     task: str
     confidence: float
     reason: str

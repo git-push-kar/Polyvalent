@@ -259,9 +259,9 @@ Although InternVL is natively a multimodal architecture expecting vision tokens 
 ### 5.2 Parameter-Efficient Fine-Tuning (PEFT / LoRA)
 All 2.2 billion parameters of the base model remain **strictly frozen**. Trainable low-rank adaptation matrices ($\mathbf{A}$ and $\mathbf{B}$) are attached to all linear attention projections and MLP layers:
 $$\mathbf{W}_{\text{adapted}} = \mathbf{W}_0 + \frac{\alpha}{r} (\mathbf{A} \cdot \mathbf{B})$$
-where rank $r = 16$, scaling factor $\alpha = 32$, and dropout $p = 0.05$. The targeted modules include attention heads (`q_proj, k_proj, v_proj, o_proj`) and feed-forward layers (`gate_proj, up_proj, down_proj` / `wqkv, wo, w1, w2, w3`).
+where rank $r = 16$, scaling factor $\alpha = 32$, and dropout $p = 0.05$. The targeted modules are the Qwen2 attention heads (`q_proj, k_proj, v_proj, o_proj`) and feed-forward layers (`gate_proj, up_proj, down_proj`) only. The legacy InternLM2-era names (`wqkv, wo, w1, w2, w3`) do **not** exist in this backbone and were never materialized as weights (see the v0 audit note below).
 
-The trainable parameters total **~24,000,000** (only **~1.08%** of the model), permitting complete fine-tuning within **12–14 GB VRAM** in 16-bit precision (or **~6 GB VRAM** in 4-bit QLoRA).
+The trainable parameters total **18,464,768** (only **~0.83%** of the model), permitting complete fine-tuning within **12–14 GB VRAM** in 16-bit precision (or **~6 GB VRAM** in 4-bit QLoRA).
 
 ```
 ======================================================================

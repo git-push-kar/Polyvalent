@@ -54,6 +54,36 @@ The **DeepfakeReasoningModel v2** is a multimodal deepfake detection and explain
 
 ---
 
+## 1.1 Integration status (`final/` repository)
+
+This guide describes the **original** `LY_C68/deepfake_project` layout. The
+model has since been integrated into the combined `final/` repository, where
+some paths and the serving wrapper differ. Both descriptions stay valid — use
+the mapping below when deploying from `final/`.
+
+| Original (`deepfake_project/`) | Integrated (`final/`) | Notes |
+| :--- | :--- | :--- |
+| `model.py` (`DeepfakeReasoningModel`) | `deepfake/wrapper.py` | verbatim copy (see `deepfake/PORTED_FROM.txt`) |
+| `runs/intern_fused_ground/adapters/llm_adapter/` | `adapters/Deepfake_adapter/llm_adapter/` | original submodule-relative keys |
+| `runs/intern_fused_ground/adapters/vision_adapter/` | `adapters/Deepfake_adapter/vision_adapter/` | original submodule-relative keys |
+| `runs/intern_fused_ground/adapters/custom_heads/` | `adapters/Deepfake_adapter/custom_heads/` | 59 tensors |
+| `models/internvl3_2b_lr_fused` | `models/internvl3_2b_lr_fused` | unchanged fused base |
+| *(new)* | `deepfake/loader.py` | anchor-first injector; raises on unmapped keys |
+| *(new)* | `deepfake/forensics.py` | preprocessing + telemetry + prompt builders |
+| *(new)* | `router/adapter_service.py` | classifier verdict → telemetry → streamed reasoning |
+
+Serving notes for the integrated path:
+
+* The reasoning stream is **XML-tag stripped** for display: `<fast>`,
+  `<planning>`, `<reasoning>`, `<reflection>`, `<conclusion>` and `<answer>`
+  are dropped, the text is kept. Internally the model still emits the trained
+  tag format — see `guides/DEEPFAKE_REASONING_PLAN.md`.
+* The classifier verdict card (verdict + confidence + hotspots + spectral) is
+  emitted before the streamed reasoning, and the classifier remains the
+  primary authority when it disagrees with the LM (see §9).
+
+---
+
 ## 2. Hardware and Environment Requirements
 
 ### 2.1 Compute and VRAM Specifications
@@ -223,54 +253,39 @@ Output package (`runs/intern_fused_ground/adapters/`, see `extraction_report.jso
 
 The two adapters cooperate at inference: the **vision adapter** enriches every image forward (classification features + attention hotspots + visual tokens), the **LLM adapter** drives the grounded reasoning generation, and the **custom heads** supply the classifier/pooling/spectral math the adapters alone cannot reproduce (`cls_head` was frozen during ground post-training but is still load-bearing at inference).
 
+> **Do not hand-roll the LoRA attach with a suffix scan.** The extracted
+> safetensors use the adapter-name-free, submodule-relative key space
+> (`base_model.model.<...>.lora_{A,B}.weight`) while the live wrapper holds
+> `...lora_{A,B}.default.weight` on `backbone.language_model` /
+> `backbone.vision_model`. A naive `k.endswith(".lora_A.default.weight")` loop
+> matches **nothing** and silently copies zero tensors — the exact failure that
+> made an earlier raw-InternVL path generate base-model text. Use the verified
+> loader instead; it remaps ANCHOR-first and **raises** on any unmapped key.
+
 ```python
 import torch
-from safetensors.torch import load_file as safetensors_load
-from transformers import AutoModel, AutoTokenizer
-from peft import PeftModel
-from model import DeepfakeReasoningModel
+from deepfake.loader import load_trained_wrapper  # final/ verified injector
 
-def load_detector_service_adapters(
-    model_path: str = "./models/internvl3_2b_lr_fused",
-    adapter_dir: str = "./runs/intern_fused_ground/adapters",
-    device: str = "cuda",
-):
-    import os
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # Fresh shell provides correctly-shaped custom heads + PEFT scaffolding.
-    model = DeepfakeReasoningModel(
-        model_path=model_path, arch_version="v2",
-        attn_implementation="sdpa", use_gradient_checkpointing=False,
-    ).to(device)
-
-    # 1. Attach LoRA adapters onto the live sub-modules.
-    #    (Equivalent manual form: PeftModel.from_pretrained(base.language_model, ...).)
-    from peft import PeftModel, get_peft_model_state_dict  # noqa
-    for subdir, attr in (("llm_adapter", "language_model"), ("vision_adapter", "vision_model")):
-        sd = safetensors_load(os.path.join(adapter_dir, subdir, "adapter_model.safetensors"), device="cpu")
-        tgt = getattr(model.backbone, attr)
-        # PEFT adapter-name-free key space matches the extracted files 1:1;
-        # copy into the live lora_A/lora_B default-adapter tensors.
-        live = dict(tgt.named_parameters())
-        for k, v in sd.items():
-            for suffix in (".lora_A.default.weight", ".lora_B.default.weight"):
-                if k.endswith(suffix):
-                    stem = k[: -len(suffix)]
-                    cand = next((lk for lk in live if lk.endswith(stem + suffix)), None)
-                    if cand is not None:
-                        live[cand].data.copy_(v.to(live[cand].dtype))
-                    break
-
-    # 2. Load full-finetune custom heads (strict=False: backbone keys intentionally absent).
-    ch = safetensors_load(os.path.join(adapter_dir, "custom_heads", "custom_heads.safetensors"), device="cpu")
-    model.load_state_dict(ch, strict=False)
-
-    model.eval()
-    return model, tokenizer
+model, tokenizer = load_trained_wrapper(
+    base_dir="./models/internvl3_2b_lr_fused",
+    llm_adapter_path="adapters/Deepfake_adapter/llm_adapter",       # original submodule-relative keys
+    vision_adapter_path="adapters/Deepfake_adapter/vision_adapter",
+    heads_path="adapters/Deepfake_adapter/custom_heads/custom_heads.safetensors",
+    device="cuda" if torch.cuda.is_available() else "cpu",
+)
 ```
+
+The remap rule applied to every checkpoint key:
+
+```
+ckpt  base_model.model.model.layers.<N>.<mod>.lora_{A,B}.weight
+  ->  backbone.language_model.base_model.model.model.layers.<N>.<mod>.lora_{A,B}.default.weight
+ckpt  base_model.model.encoder.layers.<N>.<mod>.lora_{A,B}.weight
+  ->  backbone.vision_model.base_model.model.encoder.layers.<N>.<mod>.lora_{A,B}.default.weight
+```
+
+Then the 59 custom-head tensors load 1:1 (`load_state_dict(..., strict=False)`);
+missing head tensors raise rather than run with random heads.
 
 > Round-trip integrity (exact tensor equality after save/reload) is verified by the extractor on every run. Pass `--skip_functional_check` to skip the clean-base `PeftModel.from_pretrained` attach test, `--no_custom_heads` for adapters-only output.
 

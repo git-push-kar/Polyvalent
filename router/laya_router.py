@@ -1,15 +1,16 @@
-"""Laya (System-1 decision model) router: NO fallback to static.
+"""Laya (System-1 decision model) router — the sole router.
 
-Per research requirement: Laya stands alone. Low confidence or Laya
-unavailable yields an explicit `needs_clarification` abstention — never a
-silent static substitution — so latency/accuracy numbers stay attributable.
+Laya decides over either the specialist adapters or the plain base model.
+Low confidence, or an unavailable Laya, yields an explicit
+`needs_clarification` abstention rather than a guess, so latency/accuracy
+numbers stay attributable to one decision model.
 
-Steps instrumented separately for research comparison:
+Steps instrumented separately for research:
   1. pre_gate      — free modality check (image/sensor_vector short-circuit;
-                     NOT a static decision, just input shaping)
+                     input shaping only, never a routing decision)
   2. laya_load     — checkpoint resident check / lazy load (amortized)
   3. laya_forward  — single non-autoregressive forward pass
-  4. arbitration   — threshold + abstain (no fallback)
+  4. arbitration   — threshold + abstain (no substitution)
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ from .latency import StepClock
 # upstream temperatures, see load warning); fine-tuning raises them toward
 # ~0.7+. Default accepts the usable zero-shot band so valid domain queries
 # route; raise via env after fine-tuning. Env override: FINAL_LAYA_MIN_CONF.
-# Raw confidences are always logged (logs/chat_runs.jsonl, /route/compare),
+# Raw confidences are always logged (logs/chat_runs.jsonl, /route/stats),
 # so research numbers stay honest whatever the gate is.
 LAYA_MIN_CONFIDENCE = float(os.getenv("FINAL_LAYA_MIN_CONF", "0.10"))
 
@@ -44,8 +45,8 @@ _CHOICE_QUESTION = {
 
 
 class LayaRouter(BaseRouter):
-    """Standalone Laya router. `laya` package is imported lazily so the
-    static path never requires it."""
+    """Sole router. The `laya` package is imported lazily, so a missing
+    install degrades to an explicit abstention rather than a crash."""
 
     name = "laya"
 
@@ -132,7 +133,7 @@ class LayaRouter(BaseRouter):
         except (ValueError, TypeError, AttributeError):
             return ("needs_clarification", 0.0, "laya-malformed-answer", True)
         if conf < self.min_confidence:
-            # NO static fallback: explicit abstention keeps numbers attributable.
+            # No substitution: explicit abstention keeps numbers attributable.
             return ("needs_clarification", conf,
                     f"laya-lowconf:{choice}@{conf:.2f}<{self.min_confidence}", True)
         return (choice, conf, f"laya:{choice}", False)

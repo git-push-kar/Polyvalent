@@ -105,6 +105,35 @@ This guide provides step-by-step instructions for:
 
 ---
 
+## 1.2 Integration status (`final/` repository)
+
+This guide describes the **original** `anomaly/` repository. The trained
+`intern_fused_lr` (v0) adapter is deployed inside the combined `final/`
+repository, where the rule-based static router was removed and Laya is the sole
+router. Path mapping:
+
+| Original (`anomaly/`) | Integrated (`final/`) | Notes |
+| :--- | :--- | :--- |
+| `outputs/intern_fused_lr_v0/intern_fused_lr/` | `adapters/Anomaly_adapter/` | LoRA r=16, a=32, 7 Qwen2 modules, **18,464,768** params, **F32 (73.9 MB)** |
+| `models/internvl3_2b_lr_fused` | `models/internvl3_2b_lr_fused` | shared fused base |
+| Layer-A pipeline (`preprocessing/`, `evidence/`, `outputs/...`) | stays in `anomaly/`; `final/` consumes the emitted evidence dict | unchanged contract |
+| *(new)* | `router/adapter_service.py` | `PeftModel.from_pretrained(base, adapters/Anomaly_adapter)`; raises if adapter keys fail to attach |
+| *(new)* | `router/laya_router.py` | Laya (System-1) decides sensor-anomaly vs the other specialists |
+
+Loading the v0 adapter from `final/` (verified namespace):
+
+```python
+from peft import PeftModel
+from transformers import AutoModel
+
+base = AutoModel.from_pretrained("models/internvl3_2b_lr_fused",
+                                 trust_remote_code=True, torch_dtype="auto")
+model = PeftModel.from_pretrained(base, "adapters/Anomaly_adapter",
+                                  adapter_name="anomaly", is_trainable=False)
+```
+
+---
+
 ## 2. In-Depth Component Specifications & Code Walkthrough
 
 ### 2.1 Layer A: Sensor Perception Brain
@@ -235,8 +264,8 @@ lora_config = LoraConfig(
 | Component | Count | Parameter Share |
 |---|---|---|
 | **Base Model Parameters (InternVL3-2B fused, Qwen2)** | 2,218,452,992 | ~99.17% (Strictly Frozen) |
-| **LoRA Trainable Parameters (v0 `intern_fused_lr`)** | ~18,500,000 | ~0.83% (7 modules x 28 layers x 2, r=16) |
-| **Precision** | bfloat16 / fp16 | 74 MB safetensors footprint |
+| **LoRA Trainable Parameters (v0 `intern_fused_lr`)** | 18,464,768 | ~0.83% (7 modules x 28 layers x 2, r=16) |
+| **Precision** | float32 (F32) | 73.9 MB safetensors footprint (18,464,768 x 4 B) |
 | **Comparison model v1** | same 7-module geometry | trained on fault-disjoint holdout (1944/36/36); see §6.5 of the research paper |
 
 #### 2.3.2 Vision Bypass & Prompt Ingestion
@@ -763,7 +792,7 @@ python scripts/test_end_to_end.py
 * **Layer A:** False Alarm Rate on normal holdout test runs must be $\le 1.5\%$. Fault 15 event detection rate must exceed $80\%$.
 * **Layer B Adapter:**
   * Must load onto the base model with **0 unexpected prior adapters**.
-  * Trainable parameter percentage must be $\approx 1.087\%$ (~24.1M parameters).
+  * Trainable parameter percentage must be $\approx 0.83\%$ (18,464,768 parameters).
   * Emitted JSON must achieve 100% schema conformance with no unescaped strings or missing keys.
   * Quoted telemetry numbers must match the evidence block within $0.1\%$.
 

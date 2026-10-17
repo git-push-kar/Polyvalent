@@ -220,10 +220,15 @@ class AdapterService:
                              stub: Optional[bool] = None) -> Generator[Dict[str, Any], None, None]:
         """Full forensic pass: classifier verdict first, then streamed reasoning.
 
+        The trained forensic LM emits <fast>/<planning>/<reasoning>/<reflection>/
+        <conclusion>/<answer> XML tags. They are dropped from the token stream
+        (reasoning text kept) via a streaming tag filter, so callers never have
+        to post-process the tags.
+
         Event shapes:
           {"event": "verdict", "verdict": "REAL"|"FAKE", "confidence": f,
            "hotspots": str, "spectral": str, "telemetry_ms": ms}
-          {"event": "token", ...}  (reasoning, as it generates)
+          {"event": "token", ...}  (reasoning, tags stripped, as it generates)
           {"event": "generation_receipt", ...}
         """
         import io as _io
@@ -319,17 +324,25 @@ class AdapterService:
         prefill_ms = (time.perf_counter() - pre0) * 1000.0
         per_token: list = []
         idx = 0
+        scrub = TagStripper()
         prev = time.perf_counter()
         for chunk in streamer:
             now = time.perf_counter()
             dt = (now - prev) * 1000.0
             prev = now
             per_token.append(dt)
-            yield {"event": "token", "index": idx, "text": chunk,
-                   "latency_ms": round(dt, 3),
-                   "elapsed_ms": round((now - t0) * 1000.0, 3)}
+            text = scrub.feed(chunk)
+            if text:
+                yield {"event": "token", "index": idx, "text": text,
+                       "latency_ms": round(dt, 3),
+                       "elapsed_ms": round((now - t0) * 1000.0, 3)}
             idx += 1
         thread.join()
+        tail = scrub.flush()  # release any partial-tag carry
+        if tail:
+            yield {"event": "token", "index": idx, "text": tail,
+                   "latency_ms": 0.0,
+                   "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 3)}
         if gen_kwargs.get("_worker_error"):
             yield {"event": "notice",
                    "text": "Reasoning hit an error partway; verdict above stands. "

@@ -44,7 +44,7 @@ for name, text in cases.items():
           f"model={out['routing']['model']} total={dt:.0f}ms")
 
 print()
-print("== 2. Our LayaRouter wrapper (per-step latency, no static fallback) ==")
+print("== 2. Our LayaRouter wrapper (per-step latency, sole router) ==")
 from router import LayaRouter
 
 lr = LayaRouter()  # reuses cached checkpoint from part 1

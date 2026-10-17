@@ -1,8 +1,8 @@
 """Per-step latency calculator for routing + generation comparison research.
 
-Every router and every generation stage records its own step timings so
-static-vs-laya comparisons are apples-to-apples at each stage, not just
-end-to-end totals.
+Laya and every generation stage records its own step timings so routing cost
+and generation cost are attributable at each stage, not just as end-to-end
+totals.
 """
 from __future__ import annotations
 
