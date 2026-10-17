@@ -17,7 +17,7 @@
   .assistant { align-self: flex-start; background: #8882; border-bottom-left-radius: 4px; }
   .assistant.thinking { opacity: .7; font-style: italic; }
   .assistant .think { margin: 0 0 8px; }
-  .assistant .think summary { cursor: pointer; color: #8a8a8a; font-size: 12.5px; font-style: italic; }
+  .assistant .think summary { cursor: pointer; color: #8a8a8a; font-size: 12.5px; font-style: italic; user-select: none; }
   .assistant .thinkbody { color: #8a8a8a; font-size: 12.5px; font-style: italic; line-height: 1.45; white-space: pre-wrap; border-left: 2px solid #8884; padding-left: 10px; margin: 6px 0 0; }
   .cursor::after { content: "▍"; animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
@@ -89,20 +89,31 @@ function bubble(cls, text) {
 function newAssistant() {
   const root = document.createElement('div');
   root.className = 'msg assistant';
-  const det = document.createElement('details');
-  det.className = 'think';
-  det.style.display = 'none';
-  const sum = document.createElement('summary');
-  sum.textContent = 'Reasoning';
-  const body = document.createElement('div');
-  body.className = 'thinkbody';
-  det.append(sum, body);
   const ans = document.createElement('div');
   ans.className = 'answer';
-  root.append(det, ans);
+  root.appendChild(ans);
   log.appendChild(root);
   log.scrollTop = log.scrollHeight;
-  return { root, det, body, ans };
+  return { root, ans, det: null, body: null, sum: null, thinkChars: 0 };
+}
+
+// Create the "Reasoning" disclosure lazily on the first thinking delta, so it
+// only ever appears when there is content to put inside it.
+function addThinking(ui, text) {
+  if (!text) return;
+  if (!ui.det) {
+    const det = document.createElement('details');
+    det.className = 'think';
+    const sum = document.createElement('summary');
+    const body = document.createElement('div');
+    body.className = 'thinkbody';
+    det.append(sum, body);
+    ui.root.insertBefore(det, ui.ans);
+    ui.det = det; ui.body = body; ui.sum = sum;
+  }
+  ui.body.textContent += text;
+  ui.thinkChars += text.length;
+  ui.sum.textContent = 'Reasoning (' + ui.thinkChars.toLocaleString() + ' chars)';
 }
 
 async function ask() {
@@ -153,8 +164,7 @@ async function ask() {
           gotAnswer = true;
         } else if (ev.event === 'thinking') {
           begin();
-          ui.det.style.display = 'block';
-          ui.body.textContent += ev.text;
+          addThinking(ui, ev.text);
         } else if (ev.event === 'verdict') {
           begin();
           const cls = String(ev.verdict || '').toLowerCase();
@@ -174,7 +184,7 @@ async function ask() {
     }
     ui.ans.classList.remove('cursor');
     if (!gotAnswer) {
-      if (ui.body.textContent) {
+      if (ui.det) {
         ui.det.open = true;
         ui.ans.textContent = '(reasoning only — no final answer was emitted)';
       } else {
