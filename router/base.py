@@ -5,11 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 
-TASKS = ("anomaly", "deepfake", "portfolio", "general", "needs_clarification")
-
-# Portfolio adapter is still in development: routers may select it, but the
-# adapter service answers 501 until weights land.
-PORTFOLIO_STUB = True
+TASKS = ("anomaly", "deepfake", "general", "needs_clarification")
 
 
 @dataclass

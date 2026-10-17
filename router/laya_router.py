@@ -37,7 +37,6 @@ _CHOICE_QUESTION = {
         "criteria": {
             "deepfake": "face image, real/fake verdict, spectral or forgery artifacts",
             "anomaly": "TEP sensors XMEAS/XMV, pressure, valve, reactor, fault diagnosis",
-            "portfolio": "holdings, returns, rebalance, risk, allocation",
             "general": "general question fitting no specialist",
         },
     }
@@ -103,10 +102,15 @@ class LayaRouter(BaseRouter):
         try:
             from . import _torch_shim  # noqa: F401  (eager fallback, Windows-CPU)
             from laya import Router  # lazy: static path never imports this
-            kwargs: Dict[str, Any] = {"preload": True}
+            kwargs: Dict[str, Any] = {}
             if self._device:
                 kwargs["device"] = self._device
             self._router = Router(**kwargs)
+            # Only `english` and `multilingual` are reachable: routing is by
+            # script/language, and `typed-decisions` is never selected unless
+            # auto_task_detection is on. Preloading just the two keeps the cold
+            # start to ~743M params instead of ~1.16B (Router(preload=True)).
+            self._router.preload(["english", "multilingual"])
             return True
         except Exception as exc:  # laya missing / no weights / no net
             self._load_error = f"{type(exc).__name__}: {exc}"

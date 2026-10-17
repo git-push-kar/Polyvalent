@@ -10,7 +10,6 @@ q = {
              "criteria": {
                  "deepfake": "face image, real/fake verdict, spectral or forgery artifacts",
                  "anomaly": "TEP sensors XMEAS/XMV, pressure, valve, reactor, fault diagnosis",
-                 "portfolio": "holdings, returns, rebalance, risk, allocation",
                  "general": "general question fitting no specialist"}},
     "is_anomaly": {"type": "noul",
                    "instructions": "The user is asking for TEP sensor fault diagnosis."},

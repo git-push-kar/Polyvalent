@@ -93,10 +93,6 @@ class AdapterService:
     def select(self, task: str) -> Dict[str, Any]:
         """Activate the adapter set for `task`. Returns selection receipt."""
         t0 = time.perf_counter()
-        if task == "portfolio":
-            return {"task": task, "status": 501,
-                    "detail": "portfolio adapter in development (stub)",
-                    "latency_ms": 0.0}
         try:
             self._ensure_model()
         except Exception as exc:

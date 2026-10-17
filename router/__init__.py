@@ -5,13 +5,12 @@ Laya over either the specialist adapters or the plain base model, so latency
 and accuracy numbers stay attributable to one decision model.
 """
 from .adapter_service import AdapterService
-from .base import PORTFOLIO_STUB, TASKS, BaseRouter, RouterDecision
+from .base import TASKS, BaseRouter, RouterDecision
 from .latency import GenerationReceipt, StepClock, TokenStat
 from .laya_router import LayaRouter
 from .prompts import SYSTEM_BY_TASK, build_messages
 
 __all__ = [
-    "PORTFOLIO_STUB",
     "TASKS",
     "AdapterService",
     "BaseRouter",

@@ -132,6 +132,35 @@ model = PeftModel.from_pretrained(base, "adapters/Anomaly_adapter",
                                   adapter_name="anomaly", is_trainable=False)
 ```
 
+### 1.2.1 Running & testing (`final/`)
+
+Verified environment: `anomaly\venv` (Python 3.11, torch 2.13+cu130,
+transformers 4.57.6, peft 0.20, fastapi/uvicorn) — the only env with both the
+web stack and CUDA; it loads the anomaly adapter and the deepfake wrapper on an
+RTX A5000. `laya` requires `transformers>=4.48`, so it belongs here, **not** in
+the deepfake venv (transformers 4.37.2). Do not use the global Python 3.11
+(transformers 5.15 breaks the custom InternVL remote code).
+
+```powershell
+$py = "C:\Users\Admin\Desktop\anomaly\venv\Scripts\python.exe"
+& $py -m pip install laya            # System-1 router (convaiinnovations/laya on PyPI)
+
+# offline plumbing smoke (no weights) — now exercises real Laya routing
+$env:PYTHONPATH = "C:\Users\Admin\Desktop\final"
+& $py scripts\smoke_laya_route.py    # routing_receipt -> ... -> done / SMOKE OK
+
+# serve (add $env:FINAL_STUB_GENERATION = "1" for a no-weights demo)
+cd C:\Users\Admin\Desktop\final
+& $py -m uvicorn api.server:app --host 127.0.0.1 --port 8000
+# /chat   /ui/   /health   /route/stats   /docs
+```
+
+Laya loads `english` + `multilingual` on the first route (~14 s cold, ~40 ms
+warm); `typed-decisions` is unreachable and deliberately not preloaded. Direct
+adapter tests that bypass routing: `scripts\verify_deepfake_live.py`,
+`scripts\try_real_load.py`. Note: `portfolio` was removed from the Laya choice
+criteria, so inputs fitting no specialist route to `general`.
+
 ---
 
 ## 2. In-Depth Component Specifications & Code Walkthrough

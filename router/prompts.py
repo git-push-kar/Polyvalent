@@ -77,7 +77,6 @@ SYSTEM_BY_TASK = {
     "anomaly_report": ANOMALY_SYSTEM,  # JSON RCA reports (training-faithful)
     "deepfake": DEEPFAKE_SYSTEM,
     "general": GENERAL_SYSTEM,
-    "portfolio": GENERAL_SYSTEM,  # placeholder until portfolio adapter lands
 }
 
 

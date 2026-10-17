@@ -22,7 +22,6 @@ questions = {
         "criteria": {
             "deepfake": "face image, real/fake verdict, spectral or forgery artifacts",
             "anomaly": "TEP sensors XMEAS/XMV, pressure, valve, reactor, fault diagnosis",
-            "portfolio": "holdings, returns, rebalance, risk, allocation",
             "general": "general question fitting no specialist",
         },
     }
@@ -31,7 +30,6 @@ questions = {
 cases = {
     "forensic": "Is this face image real or fake? Check for spectral forgery artifacts.",
     "tep": "XMEAS_7 reactor pressure high, XMV_3 valve stuck. Diagnose the fault.",
-    "portfolio": "Rebalance my holdings to reduce risk and improve sharpe.",
     "vague": "hello there",
 }
 
@@ -51,7 +49,6 @@ lr = LayaRouter()  # reuses cached checkpoint from part 1
 payloads = {
     "forensic": {"text": cases["forensic"]},
     "tep": {"text": cases["tep"], "values": [0.1] * 52},
-    "portfolio": {"text": cases["portfolio"]},
     "vague": {"text": cases["vague"]},
 }
 for name, payload in payloads.items():
