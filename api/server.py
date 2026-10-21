@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from router import AdapterService, LayaRouter
 from router.adapter_service import TagSectioner, TagStripper
+from router.prompts import clean_adapter_directive
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="Laya Forensic Service", version="0.2.0")
@@ -169,6 +170,7 @@ def _predict_stream(req: PredictRequest):
     sectioner = (TagSectioner(default="answer")
                  if decision.task == "reasoning" else None)
     scrub = TagStripper()
+    saw_visible = False
     for chunk in service.stream(task_prompt,
                                 max_new_tokens=req.max_new_tokens,
                                 temperature=req.temperature,
@@ -180,6 +182,8 @@ def _predict_stream(req: PredictRequest):
                 for channel, text in sectioner.feed(raw):
                     if not text:
                         continue
+                    if channel != "thinking":
+                        saw_visible = True
                     yield _sse({**chunk,
                                 "event": ("thinking" if channel == "thinking"
                                           else "token"),
@@ -194,9 +198,11 @@ def _predict_stream(req: PredictRequest):
     if sectioner is not None:
         for channel, text in sectioner.flush():
             if text:
+                if channel != "thinking":
+                    saw_visible = True
                 yield _sse({"event": ("thinking" if channel == "thinking"
                                       else "token"), "text": text})
-        if not sectioner.answer_text:
+        if not saw_visible:
             fallback = "".join(sectioner.thinking_text).strip()
             if fallback:
                 yield _sse({"event": "token", "text": fallback})
@@ -380,7 +386,9 @@ def _chat_stream(req: ChatRequest):
         if role == "assistant" and content.startswith(_HISTORY_NOISE):
             continue  # retry notices must never become model context
         norm_turns.append({"role": role, "content": content})
-    prompt = service.format_prompt(decision.task, norm_turns, req.message)
+    prompt_message = (clean_adapter_directive(req.message)
+                      if decision.task == "reasoning" else req.message)
+    prompt = service.format_prompt(decision.task, norm_turns, prompt_message)
 
     # Tokens only — latencies stay in the server log, never on the wire.
     # The reasoning adapter emits <reasoning>...</reasoning><answer>...</answer>:
@@ -389,6 +397,7 @@ def _chat_stream(req: ChatRequest):
     sectioner = (TagSectioner(default="answer")
                  if decision.task == "reasoning" else None)
     scrub = TagStripper()
+    saw_visible = False
     gen_receipt: Dict[str, Any] = {}
     for chunk in service.stream(prompt,
                                 max_new_tokens=req.max_new_tokens,
@@ -401,6 +410,8 @@ def _chat_stream(req: ChatRequest):
                 for channel, text in sectioner.feed(raw):
                     if not text:
                         continue
+                    if channel != "thinking":
+                        saw_visible = True
                     yield _sse({"event": ("thinking" if channel == "thinking"
                                           else "token"), "text": text})
             else:
@@ -413,9 +424,11 @@ def _chat_stream(req: ChatRequest):
     if sectioner is not None:
         for channel, text in sectioner.flush():
             if text:
+                if channel != "thinking":
+                    saw_visible = True
                 yield _sse({"event": ("thinking" if channel == "thinking"
                                       else "token"), "text": text})
-        if not sectioner.answer_text:
+        if not saw_visible:
             fallback = "".join(sectioner.thinking_text).strip()
             if fallback:
                 yield _sse({"event": "token", "text": fallback})

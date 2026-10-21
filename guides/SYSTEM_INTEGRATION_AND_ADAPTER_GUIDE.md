@@ -199,8 +199,13 @@ Verified end-to-end (direct inference and HTTP):
 * `anomaly` -> markdown RCA tables (routes `anomaly` for explicit XMEAS/XMV or
   TEP wording; generic sensor batches without descriptive text may fall back to
   `general`)
-* `deepfake` -> `VERDICT FAKE 0.9122 ...` (use `max_new_tokens=768`; 256
-  truncates before the answer)
+* `deepfake` -> `VERDICT FAKE 0.9122 ...` plus the model's `<conclusion>`
+  paragraph (shown; `fast/planning/reasoning/reflection` stay collapsed under
+  the disclosure). Use `max_new_tokens=768`; 256 truncates before the answer.
+* An explicit "load/use the reasoning adapter" forces `reasoning`, and the
+  directive is stripped from the prompt so the adapter sees only the question.
+  Decision wording ("should I ...", "which is better", "walk or drive") also
+  routes to `reasoning`.
 
 Laya loads `english` + `multilingual` on the first route (~14 s cold, ~40 ms
 warm); `typed-decisions` is unreachable and deliberately not preloaded. Routing

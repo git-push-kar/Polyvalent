@@ -83,18 +83,20 @@ class TagSectioner:
 
     The trained forensic LM emits
     `<fast>/<planning>/<reasoning>/<reflection>/<conclusion>/<answer>`
-    sections. Everything except `<answer>` streams on the ``thinking`` channel
-    (rendered collapsed, ChatGPT-style); `<answer>` streams on ``answer``.
-    Unknown tags are dropped (name only) and never leak. Tags may split across
-    token boundaries, so a trailing partial tag is held back until it completes
-    or is disproved.
+    sections. Deliberation (`fast/planning/reasoning/reflection`) streams on
+    the ``thinking`` channel (rendered collapsed, ChatGPT-style);
+    ``conclusion`` is the human-readable summary and streams on its own
+    channel so callers can show it; `<answer>` is the verdict word. Unknown
+    tags are dropped (name only) and never leak. Tags may split across token
+    boundaries, so a trailing partial tag is held back until it completes or
+    is disproved.
 
     `feed()` / `flush()` return ``[(channel, text), ...]`` with channel in
-    ``{"thinking", "answer"}``. Accumulated ``answer`` / ``conclusion`` text is
-    exposed for post-stream fallbacks.
+    ``{"thinking", "conclusion", "answer"}``. Accumulated ``answer`` /
+    ``conclusion`` text is exposed for post-stream fallbacks.
     """
 
-    _THINKING = ("fast", "planning", "reasoning", "reflection", "conclusion")
+    _THINKING = ("fast", "planning", "reasoning", "reflection")
 
     def __init__(self, default: str = "answer", max_carry: int = 48) -> None:
         import re
@@ -109,6 +111,8 @@ class TagSectioner:
         self.thinking_text: list = []
 
     def _channel(self) -> str:
+        if self._section == "conclusion":
+            return "conclusion"
         if self._section in self._THINKING:
             return "thinking"
         if self._section == "answer":
@@ -154,7 +158,7 @@ class TagSectioner:
             if m:
                 name = m.group(1).lower()
                 closing = tag.startswith("</")
-                if name in self._THINKING or name == "answer":
+                if name in self._THINKING or name in ("conclusion", "answer"):
                     self._section = None if closing else name
                 # unknown tags are dropped (name + attrs), never leaked
             else:
@@ -334,14 +338,16 @@ class AdapterService:
 
         The trained forensic LM emits <fast>/<planning>/<reasoning>/<reflection>/
         <conclusion>/<answer> XML tags. A streaming section router sends the
-        reasoning sections on the "thinking" channel (rendered collapsed by the
-        client) and <answer> on the "token" channel, so callers never see tags.
+        deliberation (fast/planning/reasoning/reflection) on the "thinking"
+        channel (rendered collapsed by the client) and the human-readable
+        <conclusion> plus the <answer> verdict on the "token" channel, so
+        callers never see tags and the reply is never empty.
 
         Event shapes:
           {"event": "verdict", "verdict": "REAL"|"FAKE", "confidence": f,
            "hotspots": str, "spectral": str, "telemetry_ms": ms}
-          {"event": "thinking", ...}  (fast/planning/reasoning/reflection/conclusion)
-          {"event": "token", ...}     (the <answer> text, as it generates)
+          {"event": "thinking", ...}  (fast/planning/reasoning/reflection)
+          {"event": "token", ...}     (<conclusion> summary + <answer> verdict)
           {"event": "generation_receipt", ...}
         """
         import io as _io
@@ -438,6 +444,7 @@ class AdapterService:
         per_token: list = []
         idx = 0
         sectioner = TagSectioner(default="answer")
+        visible: list = []
         prev = time.perf_counter()
         for chunk in streamer:
             now = time.perf_counter()
@@ -446,6 +453,8 @@ class AdapterService:
             per_token.append(dt)
             idx += 1
             for channel, text in sectioner.feed(chunk):
+                if channel != "thinking":
+                    visible.append(text)
                 yield {"event": "thinking" if channel == "thinking" else "token",
                        "index": idx, "text": text,
                        "latency_ms": round(dt, 3),
@@ -453,13 +462,16 @@ class AdapterService:
         thread.join()
         elapsed = round((time.perf_counter() - t0) * 1000.0, 3)
         for channel, text in sectioner.flush():  # release any partial-tag carry
+            if channel != "thinking":
+                visible.append(text)
             yield {"event": "thinking" if channel == "thinking" else "token",
                    "index": idx, "text": text, "latency_ms": 0.0,
                    "elapsed_ms": elapsed}
-        # If the run stopped before <answer> (budget/stop), surface the
-        # conclusion as the answer so the client never shows an empty reply.
-        if not sectioner.answer_text:
-            fallback = "".join(sectioner.conclusion_text).strip()
+        # If the run stopped before <conclusion>/<answer> (budget/stop),
+        # surface the deliberation so the client never shows an empty reply.
+        if not "".join(visible).strip():
+            fallback = ("".join(sectioner.conclusion_text) or
+                        "".join(sectioner.thinking_text)).strip()
             if fallback:
                 yield {"event": "token", "index": idx, "text": fallback,
                        "latency_ms": 0.0, "elapsed_ms": elapsed}

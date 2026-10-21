@@ -83,7 +83,19 @@ _REASONING_CUE = re.compile(
     r"\b(logic|logical|syllogism|deduce|deduction|infer|inference|premise|"
     r"proof|prove|puzzle|constraint|mortal|taller|tallest|therefore|"
     r"equation|algebra|solve|mathematical|math)\b|"
-    r"\bif\s+.+\s+then\b|\ball\s+\w+\s+are\b|step[- ]by[- ]step", re.I)
+    r"\bif\s+.+\s+then\b|\ball\s+\w+\s+are\b|step[- ]by[- ]step|"
+    r"\bshould\s+(?:i|we)\b|\bwhich\s+(?:one|is|should)\b|"
+    r"\b(?:walk|drive)\s+or\s+(?:walk|drive)\b|"
+    r"\b(?:pros?\s+and\s+cons?|trade-?off|decision|choose|pick)\b|"
+    r"\bis\s+it\s+better\b|\bbetter\s+to\b", re.I)
+# User-requested adapter overrides: "load/use/switch to the reasoning adapter".
+_EXPLICIT_REASONING = re.compile(
+    r"\b(?:use|load|switch\s+to|run|enable|activate|call)\b.{0,24}"
+    r"\breasoning\b|\breasoning\s+(?:adapter|model|engine)\b", re.I)
+
+
+def _explicit_reasoning(text: str) -> bool:
+    return bool(_EXPLICIT_REASONING.search(text or ""))
 
 
 def _text_signals(text: str) -> Dict[str, bool]:
@@ -209,7 +221,12 @@ class LayaRouter(BaseRouter):
             return ("anomaly", confidence, "guard:sensor_vector", False,
                     "sensor_vector")
 
-        sig = _text_signals(shaped.get("body") or "")
+        body = shaped.get("body") or ""
+        if _explicit_reasoning(body):
+            return ("reasoning", confidence, "guard:explicit-reasoning", False,
+                    "explicit-reasoning")
+
+        sig = _text_signals(body)
         if task in ("anomaly", "deepfake", "reasoning") and not sig[task]:
             picked = self._pick(sig)
             return (picked, confidence, f"guard:{task}->{picked}", False,

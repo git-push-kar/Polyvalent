@@ -14,6 +14,25 @@ Provenance:
 """
 from __future__ import annotations
 
+import re
+
+_DIRECTIVE_RE = re.compile(
+    r"[,;]?\s*(?:please\s+)?(?:use|load|switch\s+to|run|enable|activate|call)"
+    r"\s+(?:the\s+)?reasoning(?:\s+(?:adapter|model|engine))?"
+    r"(?:\s+(?:for\s+this|here|now|please))?\s*[.!]?\s*$",
+    re.I)
+
+
+def clean_adapter_directive(message: str) -> str:
+    """Strip a trailing "load the reasoning adapter" request from the prompt.
+
+    The router honours the directive, but the adapter should not have to read
+    operational instructions: it should see only the user's actual question.
+    """
+    cleaned = _DIRECTIVE_RE.sub("", message or "").strip(" ,;.")
+    return cleaned or message
+
+
 ANOMALY_SYSTEM = (
     "You are an industrial process anomaly diagnosis assistant for the "
     "Tennessee Eastman Process (TEP). You analyze structured anomaly evidence "
