@@ -52,6 +52,7 @@ CASES = [
     ("The carwash is 50m away should i walk or drive", {}, "thinking"),
     ("the car wash is 50m away, should i walk or drive, "
      "load the reasoning adapter", {}, "thinking"),
+    ("i have to deliver eggs to a farm, should i carry the hen?", {}, "token"),
     ("Please tell me if this image is fake or real", {}, "notice"),
     ("is this face real or fake", {"image_base64": REAL_B64}, "verdict"),
     ("is this face real or fake", {"image_base64": "AAAA"}, "notice"),

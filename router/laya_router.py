@@ -84,10 +84,16 @@ _REASONING_CUE = re.compile(
     r"proof|prove|puzzle|constraint|mortal|taller|tallest|therefore|"
     r"equation|algebra|solve|mathematical|math)\b|"
     r"\bif\s+.+\s+then\b|\ball\s+\w+\s+are\b|step[- ]by[- ]step|"
-    r"\bshould\s+(?:i|we)\b|\bwhich\s+(?:one|is|should)\b|"
+    # A decision question needs an explicit choice set.  Bare "should I ..."
+    # advice ("should I carry the hen?") belongs to general chat, not to the
+    # logic adapter (which force-fits it to its trained carwash/commute cases).
+    r"\bshould\s+(?:i|we)\b[^?.!]*\b(?:or|vs\.?|versus)\b|"
+    r"\bwhich\s+(?:one\s+)?should\b|"
+    r"\bwhich\s+is\s+better\b[^?.!]*\b(?:or|vs\.?|versus)\b|"
     r"\b(?:walk|drive)\s+or\s+(?:walk|drive)\b|"
-    r"\b(?:pros?\s+and\s+cons?|trade-?off|decision|choose|pick)\b|"
-    r"\bis\s+it\s+better\b|\bbetter\s+to\b", re.I)
+    r"\b(?:pros?\s+and\s+cons?|trade-?off)\b|"
+    r"\bis\s+it\s+better\b[^?.!]*\b(?:or|than)\b|"
+    r"\bbetter\s+to\b[^?.!]*\b(?:or|than)\b", re.I)
 # User-requested adapter overrides: "load/use/switch to the reasoning adapter".
 _EXPLICIT_REASONING = re.compile(
     r"\b(?:use|load|switch\s+to|run|enable|activate|call)\b.{0,24}"

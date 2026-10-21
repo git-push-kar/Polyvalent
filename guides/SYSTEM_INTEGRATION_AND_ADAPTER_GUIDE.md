@@ -204,8 +204,11 @@ Verified end-to-end (direct inference and HTTP):
   the disclosure). Use `max_new_tokens=768`; 256 truncates before the answer.
 * An explicit "load/use the reasoning adapter" forces `reasoning`, and the
   directive is stripped from the prompt so the adapter sees only the question.
-  Decision wording ("should I ...", "which is better", "walk or drive") also
-  routes to `reasoning`.
+  Decision wording with an explicit choice set ("should I walk or drive",
+  "which is better, X or Y", "pros and cons") routes to `reasoning`; bare
+  advice ("should I carry the hen?") stays on `general`, because the logic
+  adapter force-fits such out-of-distribution prompts to its trained
+  carwash/commute cases.
 
 Laya loads `english` + `multilingual` on the first route (~14 s cold, ~40 ms
 warm); `typed-decisions` is unreachable and deliberately not preloaded. Routing
