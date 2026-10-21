@@ -17,13 +17,15 @@ from safetensors.torch import load_file, save_file
 
 sys.path.insert(0, r"C:\Users\Admin\Desktop\final")
 
+_Q = (r"C:\Users\Admin\Desktop\final\quarantine"
+      r"\2026-10-21_fused_lr_and_ui\adapters\Deepfake_adapter")
 JOBS = [
-    (r"C:\Users\Admin\Desktop\final\adapters\Deepfake_adapter\llm_adapter\adapter_model.safetensors",
-     r"C:\Users\Admin\Desktop\final\adapters\Deepfake_adapter\llm_adapter_toplevel\adapter_model.safetensors",
+    (_Q + r"\llm_adapter\adapter_model.safetensors",
+     _Q + r"\llm_adapter_toplevel\adapter_model.safetensors",
      "base_model.model.model.layers.",
      "base_model.model.language_model.model.layers."),
-    (r"C:\Users\Admin\Desktop\final\adapters\Deepfake_adapter\vision_adapter\adapter_model.safetensors",
-     r"C:\Users\Admin\Desktop\final\adapters\Deepfake_adapter\vision_adapter_toplevel\adapter_model.safetensors",
+    (_Q + r"\vision_adapter\adapter_model.safetensors",
+     _Q + r"\vision_adapter_toplevel\adapter_model.safetensors",
      "base_model.model.encoder.layers.",
      "base_model.model.vision_model.encoder.layers."),
 ]

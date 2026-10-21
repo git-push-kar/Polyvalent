@@ -3,6 +3,11 @@
 **Complete Architecture Specification, API Contracts, and Deployment Guide for System Integrators**  
 *Target Audience: Backend Engineers, ML Ops Teams, and API Integrators*
 
+> **Deployment status (2026-10-21):** in `final/`, this model is served from the
+> pristine `InternVL3-2B` base with the `intern_v2_ground` adapters, not from the
+> fused `internvl3_2b_lr_fused` weights described below. See
+> `SYSTEM_INTEGRATION_AND_ADAPTER_GUIDE.md` §1.2 and `adapters/README.md`.
+
 ---
 
 ## 1. Executive System Overview

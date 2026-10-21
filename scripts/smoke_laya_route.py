@@ -17,7 +17,7 @@ from router import LayaRouter
 cases = {
     "image": {"image_bytes": "AAA", "text": "is this face real?"},
     "sensor": {"values": [0.1] * 52, "text": "XMEAS_7 pressure high, XMV_3 stuck"},
-    "general": {"text": "what can the base model answer?"},
+    "general": {"text": "What is the capital of France?"},
     "vague": {"text": "hello there"},
 }
 

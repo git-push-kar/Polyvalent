@@ -107,59 +107,112 @@ This guide provides step-by-step instructions for:
 
 ## 1.2 Integration status (`final/` repository)
 
-This guide describes the **original** `anomaly/` repository. The trained
-`intern_fused_lr` (v0) adapter is deployed inside the combined `final/`
-repository, where the rule-based static router was removed and Laya is the sole
-router. Path mapping:
+`final/` no longer uses the fused `internvl3_2b_lr_fused` base. It loads the
+**pristine chat-capable InternVL3-2B once** and attaches three mutually
+exclusive LoRA specialists on demand; the rule-based static router was removed
+and Laya is the sole router.
 
-| Original (`anomaly/`) | Integrated (`final/`) | Notes |
-| :--- | :--- | :--- |
-| `outputs/intern_fused_lr_v0/intern_fused_lr/` | `adapters/Anomaly_adapter/` | LoRA r=16, a=32, 7 Qwen2 modules, **18,464,768** params, **F32 (73.9 MB)** |
-| `models/internvl3_2b_lr_fused` | `models/internvl3_2b_lr_fused` | shared fused base |
-| Layer-A pipeline (`preprocessing/`, `evidence/`, `outputs/...`) | stays in `anomaly/`; `final/` consumes the emitted evidence dict | unchanged contract |
-| *(new)* | `router/adapter_service.py` | `PeftModel.from_pretrained(base, adapters/Anomaly_adapter)`; raises if adapter keys fail to attach |
-| *(new)* | `router/laya_router.py` | Laya (System-1) decides sensor-anomaly vs the other specialists |
+| Task | Adapter (external) | LoRA | Footprint |
+| :--- | :--- | :--- | :--- |
+| `anomaly` | `anomaly\outputs\tep_rca_internvl3_2b\internvl3_2b_pristine_rca` | r=16 / a=32, 7 Qwen2 modules | 73.9 MB |
+| `reasoning` | `C68-LR\models_v3\adapter\adapter` | r=64 / a=128, same 7 modules | ~295 MB |
+| `deepfake` | `LY_C68\deepfake_project\runs\intern_v2_ground\adapters` | LLM r=64/a=128 + vision r=16/a=32 + `custom_heads` | ~107 MB |
+| `general` | none (base only) | - | - |
 
-Loading the v0 adapter from `final/` (verified namespace):
+`deepfake` is not a plain text LoRA: it also carries a vision adapter and
+`custom_heads\custom_heads.safetensors` (59 tensors) that implement the
+`<fast>/<planning>/<reasoning>/<reflection>/<conclusion>/<answer>` verdict
+wrapper, so it is loaded by `DeepfakePredictor` on its own copy of the backbone.
 
-```python
-from peft import PeftModel
-from transformers import AutoModel
+The pristine base is
+`LY_C68\deepfake_project\models\InternVL3-2B` (`InternVLChatModel`, Qwen2.5-1.5B
+hidden 1536, 28 layers, ChatML tokenizer). All three adapters declare this exact
+path as `base_model_name_or_path`, so they can share one copy of the weights.
+Path/selection logic lives in `router/adapter_service.py`: the anomaly adapter is
+attached with `PeftModel.from_pretrained(...)` and the reasoning adapter with
+`model.load_adapter(reasoning_dir, adapter_name="reasoning",
+is_trainable=False)`; `select(task)` activates exactly one adapter (none for
+`general`). Every attach verifies that keys were actually injected
+(`_assert_attached`). See `adapters/README.md` for the full artifact map.
 
-base = AutoModel.from_pretrained("models/internvl3_2b_lr_fused",
-                                 trust_remote_code=True, torch_dtype="auto")
-model = PeftModel.from_pretrained(base, "adapters/Anomaly_adapter",
-                                  adapter_name="anomaly", is_trainable=False)
-```
+Laya (System-1) routes to `anomaly | deepfake | reasoning | general`. The
+abstention gate uses the **answer confidence** (`max(p)`), default `0.30`; the
+entropy-based `confidence` is still logged as `laya_entropy_confidence` for
+diagnosis only. Override with `FINAL_LAYA_MIN_CONF` or `.env`.
 
-### 1.2.1 Running & testing (`final/`)
+Because zero-shot Laya occasionally assigns plain conversation to a
+specialist (`what is your name` -> deepfake), every choice passes a
+deterministic **support guard**: a specialist is accepted only when the input
+has cues for it (XMEAS/XMV/TEP wording or >=2 industrial terms for anomaly;
+logic/syllogism/order cues for reasoning; face/image + real/fake cues for the
+image path). Unsupported choices and no-cue chat fall back to `general`; an
+image or a 52-value sensor vector short-circuits to deepfake/anomaly. Every
+override is logged as `reason=guard:*`, and the raw Laya probabilities remain
+in `extra`, so routing research stays auditable.
+
+### 1.2.1 Quarantined legacy assets
+
+The previous fused base, its 18M-param anomaly adapter and the old UI were moved
+to `quarantine\2026-10-21_fused_lr_and_ui\` with a rollback manifest
+(`README.md`). Do **not** load those adapters onto the pristine base: they were
+trained against `internvl3_2b_lr_fused` and their key namespaces do not match.
+
+### 1.2.2 Running & testing (`final/`)
 
 Verified environment: `anomaly\venv` (Python 3.11, torch 2.13+cu130,
-transformers 4.57.6, peft 0.20, fastapi/uvicorn) — the only env with both the
-web stack and CUDA; it loads the anomaly adapter and the deepfake wrapper on an
-RTX A5000. `laya` requires `transformers>=4.48`, so it belongs here, **not** in
-the deepfake venv (transformers 4.37.2). Do not use the global Python 3.11
-(transformers 5.15 breaks the custom InternVL remote code).
+transformers 4.57.6, peft 0.20, laya 0.4.10, fastapi/uvicorn) — the only env with
+both the web stack and CUDA; it loads the pristine base, both text adapters and
+the deepfake wrapper on an RTX A5000. `laya` requires `transformers>=4.48`, so it
+belongs here, **not** in the deepfake venv (transformers 4.37.2). Do not use the
+global Python 3.11 (transformers 5.15 breaks the custom InternVL remote code).
 
 ```powershell
 $py = "C:\Users\Admin\Desktop\anomaly\venv\Scripts\python.exe"
-& $py -m pip install laya            # System-1 router (convaiinnovations/laya on PyPI)
 
-# offline plumbing smoke (no weights) — now exercises real Laya routing
+# offline plumbing smoke (no weights) — exercises real Laya routing
 $env:PYTHONPATH = "C:\Users\Admin\Desktop\final"
 & $py scripts\smoke_laya_route.py    # routing_receipt -> ... -> done / SMOKE OK
 
 # serve (add $env:FINAL_STUB_GENERATION = "1" for a no-weights demo)
 cd C:\Users\Admin\Desktop\final
-& $py -m uvicorn api.server:app --host 127.0.0.1 --port 8000
+& $py -m uvicorn api.server:app --host 127.0.0.1 --port 8000 --workers 1
 # /chat   /ui/   /health   /route/stats   /docs
 ```
 
+Model locations are overridable without code changes:
+
+| Variable | Default |
+| :--- | :--- |
+| `FINAL_BASE_DIR` | `LY_C68\deepfake_project\models\InternVL3-2B` |
+| `FINAL_ANOMALY_DIR` | `anomaly\outputs\tep_rca_internvl3_2b\internvl3_2b_pristine_rca` |
+| `FINAL_REASONING_DIR` | `C68-LR\models_v3\adapter\adapter` |
+| `FINAL_DEEPFAKE_LLM_DIR` | `...\runs\intern_v2_ground\adapters\llm_adapter` |
+| `FINAL_DEEPFAKE_VISION_DIR` | `...\runs\intern_v2_ground\adapters\vision_adapter` |
+| `FINAL_CUSTOM_HEADS` | `...\runs\intern_v2_ground\adapters\custom_heads\custom_heads.safetensors` |
+| `FINAL_LAYA_MIN_CONF` | `0.30` |
+| `FINAL_STUB_GENERATION` | unset |
+
+Verified end-to-end (direct inference and HTTP):
+
+* `general` -> "Hello! How can I assist you today?"
+* `reasoning` -> `<reasoning>...</reasoning>` then `<answer>Alice</answer>`
+* `anomaly` -> markdown RCA tables (routes `anomaly` for explicit XMEAS/XMV or
+  TEP wording; generic sensor batches without descriptive text may fall back to
+  `general`)
+* `deepfake` -> `VERDICT FAKE 0.9122 ...` (use `max_new_tokens=768`; 256
+  truncates before the answer)
+
 Laya loads `english` + `multilingual` on the first route (~14 s cold, ~40 ms
-warm); `typed-decisions` is unreachable and deliberately not preloaded. Direct
-adapter tests that bypass routing: `scripts\verify_deepfake_live.py`,
-`scripts\try_real_load.py`. Note: `portfolio` was removed from the Laya choice
-criteria, so inputs fitting no specialist route to `general`.
+warm); `typed-decisions` is unreachable and deliberately not preloaded. Routing
+is zero-shot and occasionally unstable on short or ambiguous anomaly text —
+include sensor tags (`XMEAS_7`, `XMV_3`) or TEP wording for reliable anomaly
+routing. Direct adapter tests that bypass routing:
+`scripts\verify_deepfake_live.py`, `scripts\try_real_load.py`. Chat regression
+suite (stops being useful while the server is running because it loads a second
+model copy): `scripts\verify_chat_routing.py`. Note: `portfolio` was removed
+from the Laya choice criteria; with the support guard, inputs fitting no
+specialist (including plain chat) go to `general`, and text-only deepfake
+requests ask for an image without loading the deepfake wrapper.
 
 ---
 
@@ -292,8 +345,8 @@ lora_config = LoraConfig(
 
 | Component | Count | Parameter Share |
 |---|---|---|
-| **Base Model Parameters (InternVL3-2B fused, Qwen2)** | 2,218,452,992 | ~99.17% (Strictly Frozen) |
-| **LoRA Trainable Parameters (v0 `intern_fused_lr`)** | 18,464,768 | ~0.83% (7 modules x 28 layers x 2, r=16) |
+| **Base Model Parameters (pristine InternVL3-2B, Qwen2)** | 2,218,452,992 | ~99.17% (Strictly Frozen) |
+| **LoRA Trainable Parameters (`tep_rca` pristine)** | 18,464,768 | ~0.83% (7 modules x 28 layers x 2, r=16) |
 | **Precision** | float32 (F32) | 73.9 MB safetensors footprint (18,464,768 x 4 B) |
 | **Comparison model v1** | same 7-module geometry | trained on fault-disjoint holdout (1944/36/36); see §6.5 of the research paper |
 
@@ -435,21 +488,21 @@ Note: `api/server.py` currently calls `record.dict()` (pydantic v2 prefers
 
 ## 4. Adapter Interoperability: Porting to Other Models & Backbones
 
-The `tep_rca` / `intern_fused_lr` adapter is an independent artifact containing only LoRA weight tensors. This section explains how to use it with other backbones or swap in other foundation models.
+The `tep_rca` adapter is an independent artifact containing only LoRA weight tensors. This section explains how to use it with other backbones or swap in other foundation models.
 
 ### 4.1 Scenario A: Loading the Adapter onto Other InternVL Variants
 
-The v0 adapter attaches **only** to its exact training base (`./models/internvl3_2b_lr_fused`, Qwen2: hidden 1536 / inter 8960 / 28 layers). LoRA shapes are locked to those dimensions, so loading onto any other-sized backbone (`InternVL2-1B/4B/8B`, larger InternVL3 variants) fails with `RuntimeError: size mismatch`. Cross-backbone reuse = retrain per §4.2.
+The pristine `tep_rca` adapter attaches **only** to its exact training base (`InternVL3-2B`, Qwen2: hidden 1536 / inter 8960 / 28 layers). LoRA shapes are locked to those dimensions, so loading onto any other-sized backbone (`InternVL2-1B/4B/8B`, larger InternVL3 variants) fails with `RuntimeError: size mismatch`. Cross-backbone reuse = retrain per §4.2. (The quarantined `intern_fused_lr` adapter is base-specific to the old fused weights; see §1.2.1.)
 
 ```python
 import torch
 from transformers import AutoModel, AutoTokenizer
 from peft import PeftModel
 
-base_model_path = "./models/internvl3_2b_lr_fused"  # v0's exact base — do NOT substitute sizes
-adapter_dir = "outputs/intern_fused_lr_v0/intern_fused_lr"
+base_model_path = r"C:\Users\Admin\Desktop\LY_C68\deepfake_project\models\InternVL3-2B"
+adapter_dir = r"C:\Users\Admin\Desktop\anomaly\outputs\tep_rca_internvl3_2b\internvl3_2b_pristine_rca"
 
-# 1. Load scaled base model
+# 1. Load the pristine chat-capable base (NOT the quarantined fused model)
 model = AutoModel.from_pretrained(
     base_model_path,
     torch_dtype=torch.bfloat16,
@@ -457,19 +510,18 @@ model = AutoModel.from_pretrained(
     device_map="auto"
 )
 
-# 2. Attach the v0 TEP RCA LoRA adapter (same base only)
+# 2. Attach the pristine-trained TEP RCA LoRA adapter (same base only)
 model = PeftModel.from_pretrained(
     model,
     adapter_dir,
-    adapter_name="intern_fused_lr",
+    adapter_name="anomaly",
     is_trainable=False
 )
 model.eval()
 
 # 3. Execute inference
-# (v0 scores on its own distribution are in-distribution; see research paper §6.5.
-#  The v1 holdout adapter in outputs/intern_fused_lr_v1/ is the comparison model
-#  for zero-shot claims.)
+# The reasoning adapter attaches to the same base the same way
+# (adapter_name="reasoning"); see adapters/README.md for every artifact path.
 ```
 
 ---
@@ -546,8 +598,8 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 from peft import PeftModel
 
-base_path = "./models/internvl3_2b_lr_fused"
-adapter_path = "outputs/intern_fused_lr_v0/intern_fused_lr"
+base_path = r"C:\Users\Admin\Desktop\LY_C68\deepfake_project\models\InternVL3-2B"
+adapter_path = r"C:\Users\Admin\Desktop\anomaly\outputs\tep_rca_internvl3_2b\internvl3_2b_pristine_rca"
 export_path = "outputs/internvl_tep_standalone"
 
 print(f"Loading base model from {base_path}...")
@@ -831,8 +883,12 @@ python scripts/test_end_to_end.py
 
 | Artifact | Repository Path | Description |
 |---|---|---|
-| **Base Model Weights** | `./models/internvl3_2b_lr_fused` | Frozen 2.2B vision-language foundation backbone |
-| **Fine-Tuned Adapter v0 (live)** | `outputs/intern_fused_lr_v0/intern_fused_lr/` | Learned LoRA weights (`adapter_config.json` + `adapter_model.safetensors`), 7 Qwen2 modules |
+| **Base Model Weights (live)** | `LY_C68\deepfake_project\models\InternVL3-2B` | Pristine chat-capable 2.2B vision-language backbone (shared by all specialists) |
+| **Anomaly Adapter (live)** | `anomaly\outputs\tep_rca_internvl3_2b\internvl3_2b_pristine_rca` | LoRA r=16/a=32, 7 Qwen2 modules, 73.9 MB |
+| **Reasoning Adapter (live)** | `C68-LR\models_v3\adapter\adapter` | LoRA r=64/a=128, same 7 modules |
+| **Deepfake Adapter (live)** | `LY_C68\deepfake_project\runs\intern_v2_ground\adapters` | LLM + vision LoRA and `custom_heads` |
+| **Quarantined legacy** | `final\quarantine\2026-10-21_fused_lr_and_ui\` | Fused base + v0 adapter + old UI; see its `README.md` |
+| **Fine-Tuned Adapter v0 (research)** | `outputs/intern_fused_lr_v0/intern_fused_lr/` | Original fused-base LoRA, kept in `anomaly/` for reproduction |
 | **Comparison Adapter v1** | `outputs/intern_fused_lr_v1/intern_fused_lr/` | Same geometry, trained on fault-disjoint holdout (zero-shot reference) |
 | **LLM Data v0 / v1** | `data/llm/` / `data/llm_v1/` | v0: full-coverage in-distribution (2376/396/396); v1: holdout (1944/36/36) |
 | **Preprocessing Scaler** | `outputs/preprocessing/scaler.pkl` | Non-contaminating normal training distribution mean/variance |

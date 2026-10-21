@@ -4,13 +4,8 @@ os.environ.pop("FINAL_STUB_GENERATION", None)
 import router._torch_shim  # noqa: F401
 from router import AdapterService
 
-svc = AdapterService(
-    base_dir=r"C:\Users\Admin\Desktop\final\models\internvl3_2b_lr_fused",
-    anomaly_dir=r"C:\Users\Admin\Desktop\final\adapters\Anomaly_adapter",
-    deepfake_llm_dir=r"C:\Users\Admin\Desktop\final\adapters\Deepfake_adapter\llm_adapter_toplevel",
-    deepfake_vision_dir=r"C:\Users\Admin\Desktop\final\adapters\Deepfake_adapter\vision_adapter_toplevel",
-    custom_heads_path=r"C:\Users\Admin\Desktop\final\adapters\Deepfake_adapter\custom_heads\custom_heads.safetensors",
-)
+from api.server import get_service
+svc = get_service()
 
 for task, prompt in [("general", "Say hello briefly."),
                      ("anomaly", "XMEAS_7 high. Diagnose."),

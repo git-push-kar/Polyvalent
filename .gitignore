@@ -10,6 +10,7 @@
 
 # ── Model + adapter weights (large binaries — do NOT commit) ───────────
 models/
+quarantine/
 *.safetensors
 *.bin
 *.pt

@@ -35,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from router import AdapterService, LayaRouter
-from router.adapter_service import TagStripper
+from router.adapter_service import TagSectioner, TagStripper
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="Laya Forensic Service", version="0.2.0")
@@ -68,24 +68,35 @@ def get_laya() -> LayaRouter:
     return _LAYA
 
 
+_PRISTINE_BASE = r"C:\Users\Admin\Desktop\LY_C68\deepfake_project\models\InternVL3-2B"
+_V2_ADAPTERS = (r"C:\Users\Admin\Desktop\LY_C68\deepfake_project\runs"
+                r"\intern_v2_ground\adapters")
+
+
 def get_service() -> AdapterService:
+    """One service, one pristine base, three task adapters.
+
+    All paths default to the training repositories and are env-overridable,
+    so the weights keep their provenance instead of being copied around.
+    """
     global _SERVICE
     if _SERVICE is None:
         _SERVICE = AdapterService(
-            base_dir=os.getenv("FINAL_BASE_DIR",
-                               str(_REPO / "models" / "internvl3_2b_lr_fused")),
-            anomaly_dir=os.getenv("FINAL_ANOMALY_DIR",
-                                  str(_REPO / "adapters" / "Anomaly_adapter")),
+            base_dir=os.getenv("FINAL_BASE_DIR", _PRISTINE_BASE),
+            anomaly_dir=os.getenv(
+                "FINAL_ANOMALY_DIR",
+                r"C:\Users\Admin\Desktop\anomaly\outputs\tep_rca_internvl3_2b"
+                r"\internvl3_2b_pristine_rca"),
+            reasoning_dir=os.getenv(
+                "FINAL_REASONING_DIR",
+                r"C:\Users\Admin\Desktop\C68-LR\models_v3\adapter\adapter"),
             deepfake_llm_dir=os.getenv(
-                "FINAL_DEEPFAKE_LLM_DIR",
-                str(_REPO / "adapters" / "Deepfake_adapter" / "llm_adapter_toplevel")),
+                "FINAL_DEEPFAKE_LLM_DIR", _V2_ADAPTERS + r"\llm_adapter"),
             deepfake_vision_dir=os.getenv(
-                "FINAL_DEEPFAKE_VISION_DIR",
-                str(_REPO / "adapters" / "Deepfake_adapter" / "vision_adapter_toplevel")),
+                "FINAL_DEEPFAKE_VISION_DIR", _V2_ADAPTERS + r"\vision_adapter"),
             custom_heads_path=os.getenv(
                 "FINAL_CUSTOM_HEADS",
-                str(_REPO / "adapters" / "Deepfake_adapter" / "custom_heads"
-                    / "custom_heads.safetensors")),
+                _V2_ADAPTERS + r"\custom_heads\custom_heads.safetensors"),
         )
     return _SERVICE
 
@@ -152,6 +163,11 @@ def _predict_stream(req: PredictRequest):
     # stream passes through the XML-tag filter (tags dropped, text kept).
     task_prompt = service.format_prompt(
         decision.task, [], req.prompt or req.payload.get("text", ""))
+    # Reasoning emits <reasoning>...</reasoning><answer>...</answer>: section
+    # the first into `thinking` (collapsed) and the second into `token`.
+    # Other tasks only need tag stripping.
+    sectioner = (TagSectioner(default="answer")
+                 if decision.task == "reasoning" else None)
     scrub = TagStripper()
     for chunk in service.stream(task_prompt,
                                 max_new_tokens=req.max_new_tokens,
@@ -159,15 +175,35 @@ def _predict_stream(req: PredictRequest):
                                 repetition_penalty=req.repetition_penalty,
                                 stub=req.stub):
         if chunk.get("event") == "token":
-            text = scrub.feed(chunk.get("text", ""))
-            if not text:
-                continue
-            yield _sse({**chunk, "text": text})
+            raw = chunk.get("text", "")
+            if sectioner is not None:
+                for channel, text in sectioner.feed(raw):
+                    if not text:
+                        continue
+                    yield _sse({**chunk,
+                                "event": ("thinking" if channel == "thinking"
+                                          else "token"),
+                                "text": text})
+            else:
+                text = scrub.feed(raw)
+                if not text:
+                    continue
+                yield _sse({**chunk, "text": text})
         else:
             yield _sse(chunk)
-    tail = scrub.flush()
-    if tail:
-        yield _sse({"event": "token", "text": tail})
+    if sectioner is not None:
+        for channel, text in sectioner.flush():
+            if text:
+                yield _sse({"event": ("thinking" if channel == "thinking"
+                                      else "token"), "text": text})
+        if not sectioner.answer_text:
+            fallback = "".join(sectioner.thinking_text).strip()
+            if fallback:
+                yield _sse({"event": "token", "text": fallback})
+    else:
+        tail = scrub.flush()
+        if tail:
+            yield _sse({"event": "token", "text": tail})
     yield _sse({"event": "done"})
 
 
@@ -217,11 +253,23 @@ class ChatRequest(BaseModel):
 _CHAT_ABSTAIN_TEXT = (
     "I couldn't tell which specialist your question needs. "
     "Could you rephrase it — for example, mention whether it's about "
-    "a face image, sensor readings, or investments?"
+    "a face image, sensor readings, or a logic/reasoning problem?"
 )
 _CHAT_UNAVAILABLE_TEXT = (
     "That specialist is still being set up. Please try a question about "
-    "face-image forensics or sensor anomalies for now."
+    "face-image forensics, sensor anomalies, or logical reasoning for now."
+)
+# Canned notices are UI feedback, not dialogue. Clients (including cached
+# older pages) may echo them back in `history`; drop them so the base model
+# cannot pattern-match and repeat the notice on the next turn.
+_HISTORY_NOISE = (
+    "I couldn't tell which specialist",
+    "That specialist is still being set up",
+    "Please attach the face image",
+    "I can check a face image for you",
+    "That file doesn't look like an image",
+    "Reasoning hit an error",
+    "Generation hit an error",
 )
 
 
@@ -251,11 +299,25 @@ def _chat_stream(req: ChatRequest):
         "routing": decision.to_dict(),
     }
 
-    if decision.abstained:
-        _log_chat_run({**log_record, "outcome": "abstained"})
-        yield _sse({"event": "notice", "text": _CHAT_ABSTAIN_TEXT})
+    # The forensic judge needs pixels: ask for the image BEFORE selecting /
+    # loading the 6 GB deepfake wrapper, so text-only requests stay instant.
+    if decision.task == "deepfake" and "image_base64" not in payload:
+        _log_chat_run({**log_record, "outcome": "no-image"})
+        yield _sse({"event": "notice",
+                    "text": "I can check a face image for you — attach it with "
+                            "the 📎 button and ask again. For anything else, "
+                            "just type your question."})
         yield _sse({"event": "done"})
         return
+
+    # Chat UX: an abstention is not a wall. With no specialist signal the
+    # plain base model answers; the raw Laya decision stays in the log.
+    if decision.task == "needs_clarification":
+        _log_chat_run({**log_record, "outcome": "abstain->general"})
+        decision.task = "general"
+        decision.confidence = 0.0
+        decision.reason = "guard:general"
+        decision.abstained = False
 
     try:
         selection = service.select(decision.task)
@@ -271,16 +333,6 @@ def _chat_stream(req: ChatRequest):
         yield _sse({"event": "done"})
         return
     log_record["selection"] = selection
-
-    # The forensic judge needs the pixels: text-only deepfake requests get a
-    # friendly ask-for-image instead of a base-model confabulation.
-    if decision.task == "deepfake" and "image_base64" not in payload:
-        _log_chat_run({**log_record, "outcome": "no-image"})
-        yield _sse({"event": "notice",
-                    "text": "Please attach the face image using the 📎 button "
-                            "and I'll examine whether it's real or fake."})
-        yield _sse({"event": "done"})
-        return
 
     # Deepfake runs the dedicated forensic wrapper (verdict + streamed
     # reasoning) and needs pixels — handled before the text-token path below.
@@ -321,15 +373,21 @@ def _chat_stream(req: ChatRequest):
     for t in (req.history or [])[-6:]:
         if isinstance(t, ChatTurn):
             t = t.dict()
-        if isinstance(t, dict) and t.get("content"):
-            norm_turns.append({"role": t.get("role", "user"),
-                               "content": t.get("content")})
+        if not (isinstance(t, dict) and t.get("content")):
+            continue
+        role = t.get("role", "user")
+        content = str(t.get("content"))
+        if role == "assistant" and content.startswith(_HISTORY_NOISE):
+            continue  # retry notices must never become model context
+        norm_turns.append({"role": role, "content": content})
     prompt = service.format_prompt(decision.task, norm_turns, req.message)
 
     # Tokens only — latencies stay in the server log, never on the wire.
-    # Every task runs the streaming XML-tag filter: tags are dropped, the
-    # reasoning text is kept (the LR-fused base leaks template closers, and
-    # the forensic LM emits <fast>/<planning>/…/<answer> by training design).
+    # The reasoning adapter emits <reasoning>...</reasoning><answer>...</answer>:
+    # the first section streams as `thinking` (collapsed by the client), the
+    # second as visible `token`s. Every other task gets plain tag stripping.
+    sectioner = (TagSectioner(default="answer")
+                 if decision.task == "reasoning" else None)
     scrub = TagStripper()
     gen_receipt: Dict[str, Any] = {}
     for chunk in service.stream(prompt,
@@ -338,15 +396,33 @@ def _chat_stream(req: ChatRequest):
                                 repetition_penalty=req.repetition_penalty,
                                 stub=req.stub):
         if chunk.get("event") == "token":
-            text = scrub.feed(chunk.get("text", ""))
-            if not text:
-                continue
-            yield _sse({"event": "token", "text": text})
+            raw = chunk.get("text", "")
+            if sectioner is not None:
+                for channel, text in sectioner.feed(raw):
+                    if not text:
+                        continue
+                    yield _sse({"event": ("thinking" if channel == "thinking"
+                                          else "token"), "text": text})
+            else:
+                text = scrub.feed(raw)
+                if not text:
+                    continue
+                yield _sse({"event": "token", "text": text})
         elif chunk.get("event") == "generation_receipt":
             gen_receipt = chunk
-    tail = scrub.flush()
-    if tail:
-        yield _sse({"event": "token", "text": tail})
+    if sectioner is not None:
+        for channel, text in sectioner.flush():
+            if text:
+                yield _sse({"event": ("thinking" if channel == "thinking"
+                                      else "token"), "text": text})
+        if not sectioner.answer_text:
+            fallback = "".join(sectioner.thinking_text).strip()
+            if fallback:
+                yield _sse({"event": "token", "text": fallback})
+    else:
+        tail = scrub.flush()
+        if tail:
+            yield _sse({"event": "token", "text": tail})
     _log_chat_run({**log_record, "outcome": "answered",
                    "generation": gen_receipt})
     yield _sse({"event": "done"})

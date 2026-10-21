@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 
-TASKS = ("anomaly", "deepfake", "general", "needs_clarification")
+TASKS = ("anomaly", "deepfake", "general", "reasoning", "needs_clarification")
 
 
 @dataclass

@@ -3,163 +3,28 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laya Forensic Service — routing console</title>
+<title>Polyvalent Assistant</title>
 <style>
   :root { color-scheme: light dark; }
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0 16px 64px; max-width: 1180px; }
-  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-  .card { border: 1px solid #8885; border-radius: 8px; padding: 12px 14px; margin-top: 12px; }
-  textarea, input[type=text], input[type=number] { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; }
-  label { font-size: 13px; font-weight: 600; display: block; margin: 10px 0 4px; }
-  .row { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
-  .row > div { flex: 1; min-width: 140px; }
-  button.run { background: #16a34a; color: #fff; border: none; border-radius: 6px; padding: 10px 26px; font-size: 15px; cursor: pointer; }
-  button.run:disabled { opacity: .5; cursor: wait; }
-  table.steps { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 6px; }
-  table.steps td, table.steps th { border: 1px solid #8884; padding: 3px 8px; text-align: left; }
-  table.steps td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .answer { white-space: pre-wrap; min-height: 80px; border: 1px dashed #8886; border-radius: 6px; padding: 10px; margin-top: 8px; }
-  .cursor::after { content: "▍"; animation: blink 1s steps(1) infinite; }
-  @keyframes blink { 50% { opacity: 0; } }
-  .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 13px; font-weight: 700; }
-  .abstain { background: #fef3c7; color: #92400e; }
-  .tokbar { display: flex; align-items: flex-end; gap: 1px; height: 48px; margin-top: 8px; overflow-x: auto; }
-  .tokbar div { background: #2563eb; min-width: 4px; opacity: .75; }
-  .mono { font-family: ui-monospace, monospace; font-size: 13px; }
-  footer { margin-top: 24px; font-size: 12px; opacity: .7; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; min-height: 100dvh; display: grid; place-items: center; }
+  main { max-width: 560px; padding: 28px; line-height: 1.55; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  p { opacity: .75; margin: 0 0 16px; }
+  ul { opacity: .8; padding-left: 20px; }
+  a.button { display: inline-block; margin-top: 12px; background: #2563eb; color: #fff; text-decoration: none; padding: 10px 18px; border-radius: 10px; }
 </style>
 </head>
 <body>
-<header>
-  <h1>Laya Forensic Service</h1>
-  <span class="mono">laya (System-1, sole router) — per-step latency, token streaming</span>
-</header>
-
-<section class="tabpanel">
-  <div class="card">
-    <h3>Input → <span class="mono">POST /route/laya/predict</span> (SSE, standalone — no substitution)</h3>
-    <label>Text / prompt</label>
-    <textarea id="l-text" rows="3" placeholder="e.g. is this face real or fake?"></textarea>
-    <label>52-float sensor vector (optional)</label>
-    <textarea id="l-values" rows="2"></textarea>
-    <label>Image (optional)</label>
-    <input type="file" id="l-image" accept="image/*">
-    <div class="row">
-      <div><label>max_new_tokens</label><input type="number" id="l-maxtok" value="128" min="1" max="512"></div>
-      <div><label>stub generation (offline)</label><input type="checkbox" id="l-stub"></div>
-      <div><label>&nbsp;</label><button class="run" id="l-run">Run laya → stream</button></div>
-    </div>
-  </div>
-  <div class="card"><h3>Routing receipt</h3><div id="l-receipt" class="mono">—</div></div>
-  <div class="card"><h3>Answer (streams token-by-token)</h3><div id="l-answer" class="answer"></div>
-    <div class="tokbar" id="l-tokbar"></div><div id="l-gen" class="mono"></div></div>
-</section>
-
-<footer>Each token is flushed to the page as its SSE event arrives. Routing + per-token latencies come from the server receipts, not client timers. XML tags are stripped server-side; the reasoning text is kept.</footer>
-
-<script>
-const $ = id => document.getElementById(id);
-
-function readFileAsB64(input) {
-  return new Promise(res => {
-    if (!input.files || !input.files[0]) return res(null);
-    const r = new FileReader();
-    r.onload = () => res(String(r.result).split(',')[1]);
-    r.readAsDataURL(input.files[0]);
-  });
-}
-function parseValues(text) {
-  text = (text || '').trim();
-  if (!text) return null;
-  const nums = text.split(/[\s,]+/).map(Number);
-  return (nums.length && nums.every(isFinite)) ? nums : null;
-}
-function stepsTable(steps) {
-  if (!steps) return '';
-  const rows = Object.entries(steps).map(([k, v]) =>
-    `<tr><td>${k}</td><td class="num">${Number(v).toFixed(3)} ms</td></tr>`).join('');
-  return `<table class="steps"><tr><th>step</th><th>latency</th></tr>${rows}</table>`;
-}
-function receiptHTML(d) {
-  const abst = d.abstained ? ' <span class="badge abstain">ABSTAINED</span>' : '';
-  return `<div>task=<b>${d.task}</b> conf=${d.confidence} total=${d.latency_ms} ms${abst}<br>` +
-    `<span>reason: ${d.reason}</span>` +
-    (d.extra && d.extra.laya_model ? `<br><span>laya_model: ${d.extra.laya_model}</span>` : '') +
-    `</div>` + stepsTable(d.steps);
-}
-
-async function streamPredict(route, req, els) {
-  const btn = els.btn; btn.disabled = true;
-  els.answer.textContent = ''; els.answer.classList.add('cursor');
-  els.tokbar.innerHTML = ''; els.gen.textContent = ''; els.receipt.textContent = '…';
-  try {
-    const resp = await fetch(`/route/${route}/predict`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(req)
-    });
-    if (!resp.ok || !resp.body) { els.receipt.textContent = `HTTP ${resp.status}`; return; }
-    const reader = resp.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '', maxTok = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const parts = buf.split('\n\n'); buf = parts.pop();
-      for (const p of parts) {
-        const line = p.trim().split('\n').find(l => l.startsWith('data:'));
-        if (!line) continue;
-        const ev = JSON.parse(line.slice(5));
-        if (ev.event === 'routing_receipt' || ev.event === 'selection_receipt') {
-          els.receipt.innerHTML = receiptHTML(ev.event === 'routing_receipt' ? ev : {
-            task: ev.task, confidence: '', reason: 'adapters: ' + (ev.adapters || []).join(', ') + (ev.mode ? ' (' + ev.mode + ')' : ''),
-            latency_ms: ev.latency_ms, steps: {}, abstained: false, extra: {} });
-          if (ev.event === 'routing_receipt') els.receipt.innerHTML = receiptHTML(ev);
-        } else if (ev.event === 'verdict') {
-          els.receipt.innerHTML += `<div style="margin-top:6px;border:1px solid #8886;border-radius:6px;padding:6px 10px;">` +
-            `<b>VERDICT: ${ev.verdict}</b> (${(ev.confidence * 100).toFixed(1)}%)<br>` +
-            `hotspots: ${ev.hotspots || '—'}<br>spectral: ${ev.spectral || ''}<br>` +
-            `<span style="opacity:.7">telemetry ${ev.telemetry_ms} ms</span></div>`;
-        } else if (ev.event === 'token') {          els.answer.textContent += ev.text;
-          maxTok = Math.max(maxTok, ev.latency_ms);
-          const bar = document.createElement('div');
-          bar.style.height = Math.max(4, 44 * ev.latency_ms / Math.max(maxTok, 0.01)) + 'px';
-          bar.title = `token ${ev.index}: ${ev.latency_ms} ms`;
-          els.tokbar.appendChild(bar);
-          els.gen.textContent = `token ${ev.index} +${ev.latency_ms} ms (elapsed ${ev.elapsed_ms} ms)`;
-        } else if (ev.event === 'generation_receipt') {
-          els.gen.textContent = `done: ${ev.tokens} tokens, prefill ${ev.prefill_ms} ms, decode ${ev.decode_ms} ms, ${ev.tok_per_s} tok/s`;
-        } else if (ev.event === 'notice') {
-          els.answer.textContent += ev.text;
-        } else if (ev.event === 'done') {
-          els.gen.textContent += ` [${ev.reason || 'complete'}]`;
-        }
-      }
-    }
-  } finally { btn.disabled = false; els.answer.classList.remove('cursor'); }
-}
-
-async function buildReq(prefix) {
-  const payload = {};
-  const text = $(prefix + '-text').value.trim();
-  if (text) payload.text = text;
-  const vals = parseValues($(prefix + '-values').value);
-  if (vals) payload.values = vals;
-  const img = await readFileAsB64($(prefix + '-image'));
-  if (img) payload.image_base64 = img;
-  return {
-    payload,
-    prompt: text || 'summarise the routed analysis',
-    max_new_tokens: Number($(prefix + '-maxtok').value) || 128,
-    temperature: 0.0,
-    stub: $(prefix + '-stub').checked || null
-  };
-}
-
-$('l-run').onclick = async () => streamPredict('laya', await buildReq('l'),
-  { btn: $('l-run'), receipt: $('l-receipt'), answer: $('l-answer'), tokbar: $('l-tokbar'), gen: $('l-gen') });
-</script>
+<main>
+  <h1>Polyvalent Assistant</h1>
+  <p>One pristine InternVL3-2B base, three task adapters, one Laya router.</p>
+  <ul>
+    <li><b>General</b> — plain conversation on the base model</li>
+    <li><b>Deepfake</b> — face-image verdict + collapsed forensic reasoning</li>
+    <li><b>Anomaly</b> — TEP sensor / root-cause diagnosis</li>
+    <li><b>Reasoning</b> — step-by-step logic, collapsed under a disclosure</li>
+  </ul>
+  <a class="button" href="chat.html">Open chat</a>
+</main>
 </body>
 </html>

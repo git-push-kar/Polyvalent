@@ -26,8 +26,19 @@ from router.prompts import SYSTEM_BY_TASK, build_messages
 logger = logging.getLogger(__name__)
 
 _ANOMALY = "anomaly"
+_REASONING = "reasoning"
 _DEEPFAKE_LLM = "deepfake_llm"
 _DEEPFAKE_VISION = "deepfake_vision"
+
+
+def _assert_attached(caught, name: str) -> None:
+    """Refuse silent base-model generation when PEFT could not map weights."""
+    missing = [str(w.message)[:160] for w in caught
+               if "missing adapter keys" in str(w.message)]
+    if missing:
+        raise RuntimeError(
+            f"adapter {name!r} weights did not attach (key namespace "
+            f"mismatch): {missing[0]}... Refusing silent base-model generation.")
 
 
 class TagStripper:
@@ -95,6 +106,7 @@ class TagSectioner:
         self._max_carry = max_carry
         self.answer_text: list = []
         self.conclusion_text: list = []
+        self.thinking_text: list = []
 
     def _channel(self) -> str:
         if self._section in self._THINKING:
@@ -109,6 +121,8 @@ class TagSectioner:
         channel = self._channel()
         if self._section is None and not text.strip():
             return  # whitespace between sections — never the answer
+        if channel == "thinking":
+            self.thinking_text.append(text)
         if channel == "answer":
             self.answer_text.append(text)
         if self._section == "conclusion":
@@ -164,16 +178,16 @@ class TagSectioner:
 class AdapterService:
     def __init__(self, base_dir: str,
                  anomaly_dir: str,
+                 reasoning_dir: str,
                  deepfake_llm_dir: str,
                  deepfake_vision_dir: str,
                  custom_heads_path: Optional[str] = None) -> None:
+        # All three adapters target the SAME pristine InternVL3-2B base.
+        #   anomaly + reasoning -> one shared PeftModel (hot-swapped)
+        #   deepfake            -> dedicated wrapper (own backbone + heads)
         self.base_dir = base_dir
         self.anomaly_dir = anomaly_dir
-        # Top-level PeftModel carries the ANOMALY adapter only. Deepfake owns
-        # a dedicated DeepfakeReasoningModel wrapper (own backbone instance)
-        # because its LoRA was trained submodule-relative and its classifier
-        # heads have no counterpart on raw InternVL. Kept dirs below point at
-        # the toplevel re-keyed copies for research A/B via the raw path.
+        self.reasoning_dir = reasoning_dir
         self.deepfake_llm_dir = deepfake_llm_dir
         self.deepfake_vision_dir = deepfake_vision_dir
         self.custom_heads_path = custom_heads_path
@@ -193,6 +207,7 @@ class AdapterService:
             if os.getenv("FINAL_STUB_GENERATION", "0") == "1":
                 logger.warning("model unavailable, stub selection: %s", exc)
                 names = {"anomaly": [_ANOMALY],
+                         "reasoning": [_REASONING],
                          "deepfake": [_DEEPFAKE_LLM, _DEEPFAKE_VISION,
                                       "custom_heads(wrapper)"],
                          "general": ["base"]}[task]
@@ -204,6 +219,10 @@ class AdapterService:
             self._set_active([_ANOMALY])
             self._active = _ANOMALY
             names = [_ANOMALY]
+        elif task == "reasoning":
+            self._set_active([_REASONING])
+            self._active = _REASONING
+            names = [_REASONING]
         elif task == "deepfake":
             # Dedicated wrapper owns deepfake end-to-end (own backbone +
             # submodule LoRA + classifier heads). Top model idles on base.
@@ -237,8 +256,11 @@ class AdapterService:
             names[0] if names else next(iter(self._model.peft_config)))
 
     def _ensure_model(self) -> None:
-        """Top-level PeftModel carries the ANOMALY adapter only (verified
-        namespace). Deepfake lives in its dedicated wrapper; general is bare."""
+        """Shared PeftModel: pristine base + anomaly + reasoning adapters.
+
+        Only one adapter is active per request (hot-swapped in `select`);
+        `general` runs the bare base. Deepfake lives in its own wrapper.
+        """
         if self._model is not None:
             return
         import warnings
@@ -266,12 +288,14 @@ class AdapterService:
             model = PeftModel.from_pretrained(
                 base, self.anomaly_dir,
                 adapter_name=_ANOMALY, is_trainable=False)
-        missing = [str(w.message)[:160] for w in caught
-                   if "missing adapter keys" in str(w.message)]
-        if missing:
-            raise RuntimeError(
-                "adapter weights did not attach (key namespace mismatch): "
-                f"{missing[0]}... Refusing silent base-model generation.")
+        _assert_attached(caught, _ANOMALY)
+        # Reasoning is a second LoRA on the same base/target modules. PEFT
+        # keeps both loaded; `_set_active` picks exactly one per request.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.load_adapter(self.reasoning_dir, adapter_name=_REASONING,
+                               is_trainable=False)
+        _assert_attached(caught, _REASONING)
         model.eval()
         self._model = model
 
@@ -287,17 +311,15 @@ class AdapterService:
         import torch
         from deepfake.loader import load_trained_wrapper
 
-        # Resolve relative to this repo regardless of CWD.
-        from pathlib import Path as _P
-        repo = _P(__file__).resolve().parent.parent
+        if not self.custom_heads_path:
+            raise RuntimeError(
+                "deepfake custom_heads path is required (FINAL_CUSTOM_HEADS)")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self._deepfake = load_trained_wrapper(
             base_dir=self.base_dir,
-            llm_adapter_path=str(repo / "adapters" / "Deepfake_adapter" / "llm_adapter"),
-            vision_adapter_path=str(repo / "adapters" / "Deepfake_adapter" / "vision_adapter"),
-            heads_path=self.custom_heads_path
-            or str(repo / "adapters" / "Deepfake_adapter" / "custom_heads"
-                   / "custom_heads.safetensors"),
+            llm_adapter_path=self.deepfake_llm_dir,
+            vision_adapter_path=self.deepfake_vision_dir,
+            heads_path=self.custom_heads_path,
             device=device,
         )
         self._deepfake_origin_dirs = ("llm_adapter", "vision_adapter")

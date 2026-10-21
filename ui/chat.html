@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Forensic Assistant</title>
+<title>Polyvalent Assistant</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -18,7 +18,7 @@
   .assistant.thinking { opacity: .7; font-style: italic; }
   .assistant .think { margin: 0 0 8px; }
   .assistant .think summary { cursor: pointer; color: #8a8a8a; font-size: 12.5px; font-style: italic; user-select: none; }
-  .assistant .thinkbody { color: #8a8a8a; font-size: 12.5px; font-style: italic; line-height: 1.45; white-space: pre-wrap; border-left: 2px solid #8884; padding-left: 10px; margin: 6px 0 0; }
+  .assistant .thinkbody { color: #8a8a8a; font-size: 12.5px; font-style: italic; line-height: 1.45; white-space: pre-wrap; border-left: 2px solid #8884; padding-left: 10px; margin: 6px 0 0; max-height: 320px; overflow-y: auto; }
   .cursor::after { content: "▍"; animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
   #composer { border-top: 1px solid #8883; padding: 12px; display: flex; gap: 10px; max-width: 820px; width: 100%; margin: 0 auto 12px; }
@@ -36,8 +36,8 @@
 </head>
 <body>
 <header>
-  <h1>Forensic Assistant</h1>
-  <p>Ask about face-image forensics or sensor anomalies</p>
+  <h1>Polyvalent Assistant</h1>
+  <p>General chat · face-image forensics · TEP anomaly diagnosis · logical reasoning</p>
   <p id="modebanner" style="display:none;font-size:12px;background:#fef3c7;color:#92400e;border-radius:8px;padding:4px 12px;">Demo mode — showing placeholder text. Unset FINAL_STUB_GENERATION for live model answers.</p>
 </header>
 
@@ -46,13 +46,13 @@
 
 <div>
   <div id="composer">
-    <label for="img" title="Attach an image" style="align-self:center;cursor:pointer;font-size:20px;">📎</label>
+    <label for="img" title="Attach an image (routes to deepfake analysis)" style="align-self:center;cursor:pointer;font-size:20px;">📎</label>
     <input type="file" id="img" accept="image/*" hidden>
-    <textarea id="box" rows="1" placeholder="Type your question…  (Enter to send, Shift+Enter for new line)"></textarea>
+    <textarea id="box" rows="1" placeholder="Ask anything… attach a face image for a real/fake verdict (Enter to send)"></textarea>
     <button id="send">Send</button>
   </div>
   <div id="imgchip" style="display:none;text-align:center;font-size:13px;">🖼 image attached <a href="#" id="imgclear">remove</a></div>
-  <div id="hint">Answers stream in as they are generated. <a href="/ui/">Research console</a></div>
+  <div id="hint">The router picks the right specialist automatically. Reasoning is tucked under a disclosure.</div>
 </div>
 
 <script>
@@ -62,7 +62,7 @@ const send = document.getElementById('send');
 const imgInput = document.getElementById('img');
 const imgchip = document.getElementById('imgchip');
 const verdictBox = document.getElementById('verdict');
-const history = [];  // {role, content} — sent back for context, never shown as internals
+const history = [];
 let attachedB64 = null;
 
 imgInput.onchange = () => {
@@ -97,8 +97,7 @@ function newAssistant() {
   return { root, ans, det: null, body: null, sum: null, thinkChars: 0 };
 }
 
-// Create the "Reasoning" disclosure lazily on the first thinking delta, so it
-// only ever appears when there is content to put inside it.
+// Build the "Reasoning" disclosure lazily on the first thinking delta.
 function addThinking(ui, text) {
   if (!text) return;
   if (!ui.det) {
@@ -116,6 +115,16 @@ function addThinking(ui, text) {
   ui.sum.textContent = 'Reasoning (' + ui.thinkChars.toLocaleString() + ' chars)';
 }
 
+function renderVerdict(ev) {
+  const cls = String(ev.verdict || '').toLowerCase();
+  const conf = (Number(ev.confidence) * 100).toFixed(1);
+  verdictBox.innerHTML =
+    `<div class="vcard ${cls}"><div class="vrow"><span>Verdict: <b>${ev.verdict}</b></span>` +
+    `<span>Confidence: <b>${conf}%</b></span></div>` +
+    `<div>Hotspots: ${ev.hotspots || '—'}</div>` +
+    `<div style="opacity:.75;font-size:12px;">Spectrum: ${ev.spectral || ''}</div></div>`;
+}
+
 async function ask() {
   const message = box.value.trim();
   if (!message || send.disabled) return;
@@ -124,9 +133,9 @@ async function ask() {
   bubble('user', message + (attachedB64 ? '\n[image attached]' : ''));
   verdictBox.innerHTML = '';
   const ui = newAssistant();
-  ui.ans.textContent = 'Analyzing…';
+  ui.ans.textContent = 'Thinking…';
   ui.ans.classList.add('thinking');
-  let started = false, gotAnswer = false;
+  let started = false, gotAnswer = false, gotNotice = false, verdictLine = '';
   const begin = () => {
     if (started) return;
     started = true;
@@ -167,17 +176,15 @@ async function ask() {
           addThinking(ui, ev.text);
         } else if (ev.event === 'verdict') {
           begin();
-          const cls = String(ev.verdict || '').toLowerCase();
-          verdictBox.innerHTML =
-            `<div class="vcard ${cls}"><div class="vrow"><span>Verdict: <b>${ev.verdict}</b></span>` +
-            `<span>Confidence: <b>${(ev.confidence * 100).toFixed(1)}%</b></span></div>` +
-            `<div>Hotspots: ${ev.hotspots || '—'}</div>` +
-            `<div style="opacity:.75;font-size:12px;">Spectrum: ${ev.spectral || ''}</div></div>`;
+          renderVerdict(ev);
+          verdictLine = 'Verdict: ' + ev.verdict + ' (' +
+            (Number(ev.confidence) * 100).toFixed(1) + '%) — ' +
+            (ev.hotspots || '');
           gotAnswer = true;
         } else if (ev.event === 'notice') {
           begin();
           ui.ans.textContent = ev.text;
-          gotAnswer = true;
+          gotNotice = true;
         }
         log.scrollTop = log.scrollHeight;
       }
@@ -187,12 +194,18 @@ async function ask() {
       if (ui.det) {
         ui.det.open = true;
         ui.ans.textContent = '(reasoning only — no final answer was emitted)';
-      } else {
+      } else if (!gotNotice) {
         ui.ans.textContent = 'Sorry — something went wrong. Please try again.';
       }
     }
-    history.push({ role: 'user', content: message });
-    history.push({ role: 'assistant', content: ui.ans.textContent });
+    // Notices are UI feedback (attach an image / retry), not conversation:
+    // keep them out of history so a later turn cannot pattern-match the
+    // canned text and repeat it.
+    if (gotAnswer) {
+      history.push({ role: 'user', content: message });
+      const reply = (ui.ans.textContent || verdictLine).trim();
+      if (reply) history.push({ role: 'assistant', content: reply });
+    }
   } catch (err) {
     ui.ans.classList.remove('cursor');
     ui.ans.textContent = 'Connection error — is the server running?';
