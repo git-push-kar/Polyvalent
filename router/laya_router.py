@@ -90,7 +90,7 @@ _REASONING_CUE = re.compile(
     r"\bshould\s+(?:i|we)\b[^?.!]*\b(?:or|vs\.?|versus)\b|"
     r"\bwhich\s+(?:one\s+)?should\b|"
     r"\bwhich\s+is\s+better\b[^?.!]*\b(?:or|vs\.?|versus)\b|"
-    r"\b(?:walk|drive)\s+or\s+(?:walk|drive)\b|"
+    r"\b(?:choose|pick|decide)\b[^?.!]*\b(?:between|or|vs\.?|versus)\b|"
     r"\b(?:pros?\s+and\s+cons?|trade-?off)\b|"
     r"\bis\s+it\s+better\b[^?.!]*\b(?:or|than)\b|"
     r"\bbetter\s+to\b[^?.!]*\b(?:or|than)\b", re.I)

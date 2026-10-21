@@ -6,6 +6,11 @@ Covers the routing failures reported in the UI:
   * an image request yields a verdict
   * the next general turn returns to the bare base (no adapter stickiness)
 
+The cases are *inputs only*. Nothing here supplies answers, stubs the router,
+or checks generated text: every request goes through the real `/chat/stream`
+via TestClient, and the assertion is only the first SSE event kind. The reply
+text is produced live by the shipped base/adapter weights.
+
 Run with the uvicorn server STOPPED (this loads a second model copy):
     & $py scripts\\verify_chat_routing.py
 """
@@ -53,6 +58,12 @@ CASES = [
     ("the car wash is 50m away, should i walk or drive, "
      "load the reasoning adapter", {}, "thinking"),
     ("i have to deliver eggs to a farm, should i carry the hen?", {}, "token"),
+    # Novel phrasings (not the reported bugs): the generic cue patterns must
+    # generalize, not memorize the examples above.
+    ("should I take the stairs or the elevator?", {}, "thinking"),
+    ("we must choose between leasing or buying the van", {}, "thinking"),
+    ("should I buy the red jacket?", {}, "token"),
+    ("is it better to start now?", {}, "token"),
     ("Please tell me if this image is fake or real", {}, "notice"),
     ("is this face real or fake", {"image_base64": REAL_B64}, "verdict"),
     ("is this face real or fake", {"image_base64": "AAAA"}, "notice"),
