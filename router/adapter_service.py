@@ -198,50 +198,80 @@ class AdapterService:
         self._model = None
         self._tokenizer = None
         self._active: Optional[str] = None
+        self._loaded_adapters: set = set()
         self._deepfake = None          # (wrapper, tokenizer)
         self._deepfake_origin_dirs: Optional[Tuple[str, str]] = None
 
     # -- adapter selection --------------------------------------------
+    @property
+    def loaded_adapters(self) -> list:
+        """Adapter weights resident in memory.
+
+        `["base"]` means the bare text backbone is loaded and no LoRA is;
+        `[]` means nothing text-side is resident (e.g. a deepfake-only run).
+        """
+        out = sorted(self._loaded_adapters)
+        if not out and self._model is not None:
+            out = ["base"]
+        return out
+
+    @property
+    def active_adapter(self) -> Optional[str]:
+        """Adapter activated by the latest `select`, or None for bare base."""
+        return self._active
+
     def select(self, task: str) -> Dict[str, Any]:
-        """Activate the adapter set for `task`. Returns selection receipt."""
+        """Activate the adapter set for `task`, loading it lazily if needed.
+
+        `general` loads only the pristine base, `anomaly` loads the anomaly
+        LoRA, `reasoning` loads the LR LoRA, and `deepfake` loads its own
+        wrapper (the text base is not required). Once resident an adapter is
+        cached; switching only changes which one is active.
+        """
+        if task not in ("anomaly", "reasoning", "deepfake", "general"):
+            raise ValueError(f"unknown task: {task}")
         t0 = time.perf_counter()
         try:
-            self._ensure_model()
+            if task == "deepfake":
+                # Dedicated wrapper owns deepfake end-to-end (own backbone +
+                # submodule LoRA + classifier heads). Idle the text model if a
+                # text turn already loaded it; never load it just for an image.
+                if self._model is not None:
+                    self._set_active([])
+                self._ensure_deepfake()
+                self._active = "deepfake"
+                names = ["deepfake_llm(wrapper)", "deepfake_vision(wrapper)",
+                         "custom_heads(wrapper)"]
+            else:
+                self._ensure_model()
+                if task == "anomaly":
+                    self._ensure_adapter(_ANOMALY)
+                    self._set_active([_ANOMALY])
+                    self._active = _ANOMALY
+                    names = [_ANOMALY]
+                elif task == "reasoning":
+                    self._ensure_adapter(_REASONING)
+                    self._set_active([_REASONING])
+                    self._active = _REASONING
+                    names = [_REASONING]
+                else:
+                    self._set_active([])  # bare base
+                    self._active = None
+                    names = ["base"]
         except Exception as exc:
             if os.getenv("FINAL_STUB_GENERATION", "0") == "1":
                 logger.warning("model unavailable, stub selection: %s", exc)
-                names = {"anomaly": [_ANOMALY],
-                         "reasoning": [_REASONING],
-                         "deepfake": [_DEEPFAKE_LLM, _DEEPFAKE_VISION,
-                                      "custom_heads(wrapper)"],
-                         "general": ["base"]}[task]
-                return {"task": task, "status": 200, "adapters": names,
-                        "mode": "stub",
+                stub_names = {"anomaly": [_ANOMALY],
+                              "reasoning": [_REASONING],
+                              "deepfake": [_DEEPFAKE_LLM, _DEEPFAKE_VISION,
+                                           "custom_heads(wrapper)"],
+                              "general": ["base"]}[task]
+                return {"task": task, "status": 200, "adapters": stub_names,
+                        "loaded": [], "active": None, "mode": "stub",
                         "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3)}
             raise
-        if task == "anomaly":
-            self._set_active([_ANOMALY])
-            self._active = _ANOMALY
-            names = [_ANOMALY]
-        elif task == "reasoning":
-            self._set_active([_REASONING])
-            self._active = _REASONING
-            names = [_REASONING]
-        elif task == "deepfake":
-            # Dedicated wrapper owns deepfake end-to-end (own backbone +
-            # submodule LoRA + classifier heads). Top model idles on base.
-            self._set_active([])
-            self._ensure_deepfake()
-            self._active = "deepfake"
-            names = ["deepfake_llm(wrapper)", "deepfake_vision(wrapper)",
-                     "custom_heads(wrapper)"]
-        elif task == "general":
-            self._set_active([])  # plain base model
-            self._active = None
-            names = ["base"]
-        else:
-            raise ValueError(f"unknown task: {task}")
         return {"task": task, "status": 200, "adapters": names,
+                "loaded": self.loaded_adapters, "active": self._active,
                 "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3)}
 
     def _set_active(self, names: list) -> None:
@@ -250,6 +280,9 @@ class AdapterService:
         Layers ignore names missing from their own lora_A, so disjoint
         adapters (llm vs vision) compose safely; [] = plain base model.
         """
+        if self._model is None or not self._loaded_adapters:
+            return
+        names = [n for n in names if n in self._loaded_adapters]
         from peft.tuners.tuners_utils import BaseTunerLayer
         for module in self._model.modules():
             if isinstance(module, BaseTunerLayer) and hasattr(module, "lora_A"):
@@ -260,15 +293,14 @@ class AdapterService:
             names[0] if names else next(iter(self._model.peft_config)))
 
     def _ensure_model(self) -> None:
-        """Shared PeftModel: pristine base + anomaly + reasoning adapters.
+        """Load the pristine base + tokenizer only; no adapters.
 
-        Only one adapter is active per request (hot-swapped in `select`);
-        `general` runs the bare base. Deepfake lives in its own wrapper.
+        A general-chat session therefore never touches the anomaly or LR
+        weights. `_ensure_adapter` attaches them the first time they are
+        selected.
         """
         if self._model is not None:
             return
-        import warnings
-        from peft import PeftModel
         from transformers import AutoModel, AutoTokenizer
 
         self._tokenizer = AutoTokenizer.from_pretrained(
@@ -287,21 +319,30 @@ class AdapterService:
                 "<IMG_CONTEXT>")
         except Exception as exc:
             logger.warning("could not set img_context_token_id: %s", exc)
+        base.eval()
+        self._model = base
+
+    def _ensure_adapter(self, name: str) -> None:
+        """Attach one LoRA to the shared base the first time it is selected."""
+        if name in self._loaded_adapters:
+            return
+        path = {_ANOMALY: self.anomaly_dir,
+                _REASONING: self.reasoning_dir}[name]
+        import warnings
+        from peft import PeftModel
+
+        self._ensure_model()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            model = PeftModel.from_pretrained(
-                base, self.anomaly_dir,
-                adapter_name=_ANOMALY, is_trainable=False)
-        _assert_attached(caught, _ANOMALY)
-        # Reasoning is a second LoRA on the same base/target modules. PEFT
-        # keeps both loaded; `_set_active` picks exactly one per request.
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            model.load_adapter(self.reasoning_dir, adapter_name=_REASONING,
-                               is_trainable=False)
-        _assert_attached(caught, _REASONING)
-        model.eval()
-        self._model = model
+            if isinstance(self._model, PeftModel):
+                self._model.load_adapter(path, adapter_name=name,
+                                         is_trainable=False)
+            else:
+                self._model = PeftModel.from_pretrained(
+                    self._model, path, adapter_name=name, is_trainable=False)
+        _assert_attached(caught, name)
+        self._model.eval()
+        self._loaded_adapters.add(name)
 
     def _ensure_deepfake(self):
         """Dedicated DeepfakeReasoningModel wrapper (own backbone instance).

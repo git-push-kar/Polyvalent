@@ -64,6 +64,8 @@ CASES = [
     ("we must choose between leasing or buying the van", {}, "thinking"),
     ("should I buy the red jacket?", {}, "token"),
     ("is it better to start now?", {}, "token"),
+    ("XMEAS_7 reactor pressure high, XMV_3 valve stuck. "
+     "Diagnose the fault.", {}, "token"),
     ("Please tell me if this image is fake or real", {}, "notice"),
     ("is this face real or fake", {"image_base64": REAL_B64}, "verdict"),
     ("is this face real or fake", {"image_base64": "AAAA"}, "notice"),

@@ -15,8 +15,9 @@ the same pristine base:
 | `deepfake` | `C:\Users\Admin\Desktop\LY_C68\deepfake_project\runs\intern_v2_ground\adapters` | `llm_adapter/` (r=64), `vision_adapter/` (r=16), `custom_heads/custom_heads.safetensors` |
 | `general` | — | pristine base, no adapter |
 
-`anomaly` and `reasoning` are attached to one shared `PeftModel` and
-hot-swapped per request. `deepfake` runs in the dedicated
+`anomaly` and `reasoning` share one `PeftModel` but attach lazily: only the
+LoRA for the routed specialist is loaded, and it stays cached for hot-swapping
+on later turns. `general` never loads a LoRA. `deepfake` runs in the dedicated
 `DeepfakeReasoningModel` wrapper (its classifier heads have no InternVL
 counterpart).
 

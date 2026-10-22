@@ -128,11 +128,11 @@ The pristine base is
 `LY_C68\deepfake_project\models\InternVL3-2B` (`InternVLChatModel`, Qwen2.5-1.5B
 hidden 1536, 28 layers, ChatML tokenizer). All three adapters declare this exact
 path as `base_model_name_or_path`, so they can share one copy of the weights.
-Path/selection logic lives in `router/adapter_service.py`: the anomaly adapter is
-attached with `PeftModel.from_pretrained(...)` and the reasoning adapter with
-`model.load_adapter(reasoning_dir, adapter_name="reasoning",
-is_trainable=False)`; `select(task)` activates exactly one adapter (none for
-`general`). Every attach verifies that keys were actually injected
+Path/selection logic lives in `router/adapter_service.py`: the base loads once;
+the anomaly and LR LoRAs attach **lazily** the first time their task is
+selected (`PeftModel.from_pretrained` for the first, `model.load_adapter` for
+the second) and stay cached. `select(task)` activates exactly one adapter (none
+for `general`). Every attach verifies that keys were actually injected
 (`_assert_attached`). See `adapters/README.md` for the full artifact map.
 
 Laya (System-1) routes to `anomaly | deepfake | reasoning | general`. The
@@ -217,10 +217,39 @@ include sensor tags (`XMEAS_7`, `XMV_3`) or TEP wording for reliable anomaly
 routing. Direct adapter tests that bypass routing:
 `scripts\verify_deepfake_live.py`, `scripts\try_real_load.py`. Chat regression
 suite (stops being useful while the server is running because it loads a second
-model copy): `scripts\verify_chat_routing.py`. Note: `portfolio` was removed
+model copy): `scripts\verify_chat_routing.py`; lazy-load/activation policy:
+`scripts\verify_adapter_loading.py`. Note: `portfolio` was removed
 from the Laya choice criteria; with the support guard, inputs fitting no
 specialist (including plain chat) go to `general`, and text-only deepfake
 requests ask for an image without loading the deepfake wrapper.
+
+#### LR (reasoning) adapter load conditions
+
+The LR LoRA is loaded lazily by `select("reasoning")`; it is not part of
+startup and is not loaded by general chat. The exact policy:
+
+* **Loaded** on the first request routed to `reasoning`:
+  `_ensure_adapter("reasoning")` attaches it to the shared pristine base and
+  verifies the key namespace (`_assert_attached`). Once resident it is cached;
+  later reasoning turns reuse it.
+* **Activated** only while the routed task is `reasoning`. A later `general`
+  or `anomaly` turn deactivates it and returns those paths to the bare base /
+  anomaly adapter, but the LR weights stay resident.
+* **Routing enters `reasoning`** when the support guard sees either
+  (a) an explicit "use/load/switch to ... reasoning adapter" directive, or
+  (b) formal logic/math cues (`if ... then`, `all ... are`, syllogism, proof,
+  equation, `step by step`, ...), or (c) a decision with an explicit choice
+  set (`should I X or Y`, `which is better, X or Y`, `choose between X or Y`,
+  pros/cons, trade-off). Bare advice ("should I carry the hen?") stays
+  `general`.
+* **Not loaded** by plain chat (base only), anomaly, or deepfake. Deepfake
+  loads its own wrapper and does not require the text base at all; text-only
+  deepfake requests return the attach-image notice before selection.
+
+Memory is therefore lazy: plain chat holds only the base; one text specialist
+adds its 74–295 MB LoRA; a deepfake-only session holds just the wrapper
+(~6 GB). If a text turn precedes an image turn, both the text base and the
+wrapper stay resident (~10 GB).
 
 ---
 

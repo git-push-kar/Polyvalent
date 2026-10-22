@@ -120,6 +120,10 @@ GENERAL_SYSTEM = (
     "user's question back as tags."
 )
 
+# Selected only for routed `reasoning` turns, when `AdapterService.select`
+# lazily attaches the LR LoRA. See `LayaRouter._guard` for the load conditions
+# and the "LR (reasoning) adapter load conditions" section of the integration
+# guide. This is the exact Stage-4 prompt the adapter was trained with.
 REASONING_SYSTEM = (
     "You are a rigorous logical reasoning engine. Work through the problem "
     "step by step inside <reasoning>...</reasoning>, then give the final answer "
