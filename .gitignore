@@ -10,7 +10,10 @@
 
 # ── Model + adapter weights (large binaries — do NOT commit) ───────────
 models/
-data/
+# data/ holds scratch exports (the multi-GB Rieth CSVs); only the split
+# test set the README promises is tracked.
+data/*
+!data/tep_test/
 quarantine/
 *.safetensors
 *.bin

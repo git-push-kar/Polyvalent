@@ -1,0 +1,43 @@
+{
+  "name": "TEP testing set \u2014 Rieth et al. (2017), 52 variables, 3 min sampling",
+  "provenance": {
+    "fault_free": "C:\\Users\\Admin\\Desktop\\anomaly\\data\\raw\\normal\\TEP_FaultFree_Testing.csv",
+    "faulty": "C:\\Users\\Admin\\Desktop\\anomaly\\data\\raw\\faults\\TEP_Faulty_Testing.csv",
+    "split_with": "scripts/prepare_tep_testset.py --runs 1 2 3",
+    "note": "Copies only: the source export is untouched."
+  },
+  "fault_onset": 20,
+  "fault_onset_note": "Faults are introduced 1 h (20 samples) into every run, unlike the Braatz files (8 h / sample 160).",
+  "sample_minutes": 3,
+  "samples_per_run": 960,
+  "sensors": 52,
+  "runs": [
+    1,
+    2,
+    3
+  ],
+  "faults": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20
+  ],
+  "synthetic_runs": "always offered by the tab as the inject-a-fault option"
+}

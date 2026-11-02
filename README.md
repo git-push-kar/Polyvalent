@@ -156,9 +156,8 @@ Use `--workers 1`. Each worker process would load its own copy of the weights.
    under `data/tep_test/`: `fault0_run{1,2,3}.csv` (fault-free) plus
    `fault01..fault20_run{1,2,3}.csv`, 960 samples x 52 sensors each, ~22 MB in total.
    They were split from
-   `...nomaly\dataaw
-ormal\TEP_FaultFree_Testing.csv` and
-   `...nomaly\dataawaults\TEP_Faulty_Testing.csv`; the source export is
+   `../anomaly/data/raw/normal/TEP_FaultFree_Testing.csv` and
+   `../anomaly/data/raw/faults/TEP_Faulty_Testing.csv`; the source export is
    untouched. `data/tep_test/dataset.json` records that provenance and the fault
    onset (sample 20 = 1 h in this export, not the 8 h of the Braatz files).
    To split more runs from the same sources:
