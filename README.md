@@ -100,18 +100,20 @@ pip install laya   # or your internal wheel
 
 ## Adapters and paths
 
-The weights are **not** in this repository. They stay on the training machine.
-Point the service at them with environment variables. The defaults are the
-original training paths, listed in `adapters/README.md`.
+The weights live **inside this repository**: the base model in
+`models/InternVL3-2B`, the task adapters in `adapters/`. They were copied from
+the training runs, which keep their originals (`adapters/README.md` lists both
+sides). Paths resolve from the repository root, so the service starts with no
+environment variables; set any of them to point somewhere else.
 
-| Variable | Points to |
-|---|---|
-| `FINAL_BASE_DIR` | pristine InternVL3-2B directory |
-| `FINAL_ANOMALY_DIR` | anomaly PEFT LoRA directory (`adapter_config.json` + `adapter_model.safetensors`) |
-| `FINAL_REASONING_DIR` | reasoning PEFT LoRA directory |
-| `FINAL_DEEPFAKE_LLM_DIR` | deepfake `llm_adapter/` |
-| `FINAL_DEEPFAKE_VISION_DIR` | deepfake `vision_adapter/` |
-| `FINAL_CUSTOM_HEADS` | deepfake `custom_heads/custom_heads.safetensors` |
+| Variable | Default | Points to |
+|---|---|---|
+| `FINAL_BASE_DIR` | `models/InternVL3-2B` | pristine InternVL3-2B directory |
+| `FINAL_ANOMALY_DIR` | `adapters/anomaly` | anomaly PEFT LoRA (`adapter_config.json` + `adapter_model.safetensors`) |
+| `FINAL_REASONING_DIR` | `adapters/reasoning` | reasoning PEFT LoRA |
+| `FINAL_DEEPFAKE_LLM_DIR` | `adapters/deepfake/llm_adapter` | deepfake LLM LoRA |
+| `FINAL_DEEPFAKE_VISION_DIR` | `adapters/deepfake/vision_adapter` | deepfake vision LoRA |
+| `FINAL_CUSTOM_HEADS` | `adapters/deepfake/custom_heads/custom_heads.safetensors` | deepfake classifier heads |
 
 Other settings:
 
@@ -130,10 +132,7 @@ Other settings:
 ## Running
 
 ```powershell
-# real models
-$env:FINAL_BASE_DIR = "D:\models\InternVL3-2B"
-$env:FINAL_ANOMALY_DIR = "D:\adapters\anomaly"
-# ... other paths ...
+# real models (weights are in models/ and adapters/, no env vars needed)
 python -m uvicorn api.server:app --host 0.0.0.0 --port 8000 --workers 1
 
 # UI/demo without weights
@@ -214,6 +213,8 @@ router/adapter_service.py  real backends (PEFT attach/unload, deepfake wrapper),
 router/prompts.py        training-faithful system prompts per task
 deepfake/                ported DeepfakeReasoningModel wrapper, loader, forensics
 tep_sim/                 TEP metadata, dataset loading, detector, evidence → prompt
+models/InternVL3-2B/     pristine shared base weights (local copy, git-ignored)
+adapters/                task LoRAs + deepfake heads (local copies, git-ignored)
 ui/index.html            single-page UI (Chat · Anomaly detection · Finance)
 scripts/                 live-model probes and dataset preparation
 guides/                  integration guide and research report drafts

@@ -19,6 +19,12 @@ quarantine/
 *.ckpt
 *.onnx
 
+# Adapter weight binaries copied into adapters/ (configs stay tracked)
+adapters/**/*.safetensors
+adapters/**/adapter_model.bin
+adapters/**/adapter_model.pt
+adapters/deepfake/custom_heads/
+
 # ── Provenance: keep small JSONs/YAMLs, drop any accidental dumps ───────
 # (tokenizer.json ~7MB is intentionally TRACKED as parity proof)
 adapters/**/dataset_dict*.jsonl

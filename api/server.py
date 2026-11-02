@@ -89,36 +89,59 @@ def get_laya() -> LayaRouter:
     return _LAYA
 
 
-_PRISTINE_BASE = r"C:\Users\Admin\Desktop\LY_C68\deepfake_project\models\InternVL3-2B"
-_V2_ADAPTERS = (r"C:\Users\Admin\Desktop\LY_C68\deepfake_project\runs"
-                r"\intern_v2_ground\adapters")
+# Weights live inside this repository (copied from the training runs, which
+# keep their originals):
+#   models/InternVL3-2B   pristine shared base
+#   adapters/anomaly      TEP RCA LoRA (r=16 / a=32)
+#   adapters/reasoning    reasoning LoRA (r=64 / a=128)
+#   adapters/deepfake     llm_adapter/, vision_adapter/, custom_heads/
+_PRISTINE_BASE = _REPO / "models" / "InternVL3-2B"
+_ANOMALY_DIR = _REPO / "adapters" / "anomaly"
+_REASONING_DIR = _REPO / "adapters" / "reasoning"
+_DEEPFAKE_ADAPTERS = _REPO / "adapters" / "deepfake"
+
+
+def _weights(env: str, local: Path) -> str:
+    """Resolve one weight path: the FINAL_* override if it exists, else `local`.
+
+    An override left over from another machine (say FINAL_BASE_DIR pointing at
+    a drive that is no longer mounted) used to fail the first routed request
+    with an HFValidationError, because transformers reads a non-existent path
+    as a Hub repo id. An override that is not there is now logged and skipped,
+    and the copy bundled in this repository is used instead.
+    """
+    configured = (os.getenv(env) or "").strip().strip('"')
+    if configured:
+        candidate = Path(configured).expanduser()
+        if not candidate.is_absolute():
+            candidate = _REPO / candidate
+        if candidate.exists():
+            return str(candidate)
+        logger.warning("%s=%s does not exist; falling back to %s",
+                       env, configured, local)
+    return str(local)
 
 
 def get_service() -> AdapterService:
     """One service, one pristine base, three task adapters (lazy).
 
-    All paths default to the training repositories and are env-overridable,
-    so the weights keep their provenance instead of being copied around.
-    Nothing is loaded here: each adapter loads on its first routed request.
+    Defaults are the in-repo copies above; FINAL_* variables still override
+    them when they point at weights that exist. Nothing is loaded here: each
+    adapter loads on its first routed request.
     """
     global _SERVICE
     if _SERVICE is None:
         _SERVICE = AdapterService(
-            base_dir=os.getenv("FINAL_BASE_DIR", _PRISTINE_BASE),
-            anomaly_dir=os.getenv(
-                "FINAL_ANOMALY_DIR",
-                r"C:\Users\Admin\Desktop\anomaly\outputs\tep_rca_internvl3_2b"
-                r"\internvl3_2b_pristine_rca"),
-            reasoning_dir=os.getenv(
-                "FINAL_REASONING_DIR",
-                r"C:\Users\Admin\Desktop\C68-LR\models_v3\adapter\adapter"),
-            deepfake_llm_dir=os.getenv(
-                "FINAL_DEEPFAKE_LLM_DIR", _V2_ADAPTERS + r"\llm_adapter"),
-            deepfake_vision_dir=os.getenv(
-                "FINAL_DEEPFAKE_VISION_DIR", _V2_ADAPTERS + r"\vision_adapter"),
-            custom_heads_path=os.getenv(
+            base_dir=_weights("FINAL_BASE_DIR", _PRISTINE_BASE),
+            anomaly_dir=_weights("FINAL_ANOMALY_DIR", _ANOMALY_DIR),
+            reasoning_dir=_weights("FINAL_REASONING_DIR", _REASONING_DIR),
+            deepfake_llm_dir=_weights("FINAL_DEEPFAKE_LLM_DIR",
+                                      _DEEPFAKE_ADAPTERS / "llm_adapter"),
+            deepfake_vision_dir=_weights("FINAL_DEEPFAKE_VISION_DIR",
+                                         _DEEPFAKE_ADAPTERS / "vision_adapter"),
+            custom_heads_path=_weights(
                 "FINAL_CUSTOM_HEADS",
-                _V2_ADAPTERS + r"\custom_heads\custom_heads.safetensors"),
+                _DEEPFAKE_ADAPTERS / "custom_heads" / "custom_heads.safetensors"),
         )
     return _SERVICE
 
