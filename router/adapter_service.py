@@ -1,12 +1,13 @@
-"""Shared adapter service: one frozen base, named PEFT adapters, hot-swap.
+"""Shared adapter service: one frozen base, lazily loaded task adapters.
 
-Routing layer picks the task; this service executes it. Generation is a
+Routing layer (Laya) picks the task; this service loads exactly the weights
+that task needs, releases the previous task's adapter, and executes it. Generation is a
 token-by-token stream (never a single buffered string) so the API can flush
 each token to the client as it arrives, with per-token latency attached.
 
 Two generation backends:
   * real  — transformers generate() + TextIteratorStreamer on a thread,
-            through PeftModel with adapter_name= switching.
+            on the bare base or base + the single resident LoRA.
   * stub  — deterministic word-split stream (FINAL_STUB_GENERATION=1 or
             model unloadable); verifies streaming shape without GPU.
 """
@@ -17,11 +18,12 @@ import os
 import threading
 import time
 import traceback
-from pathlib import Path
-from typing import Any, Dict, Generator, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, Dict, Generator, Optional
 
 from router.latency import GenerationReceipt, TokenStat
-from router.prompts import SYSTEM_BY_TASK, build_messages
+from router.prompts import build_messages
+from router.residency import AdapterResidency, Backend
 
 logger = logging.getLogger(__name__)
 
@@ -179,15 +181,38 @@ class TagSectioner:
         return out
 
 
+class BusyError(RuntimeError):
+    """Another request holds the model (swap or generation in progress)."""
+
+
+class _CancelCriteria:
+    """StoppingCriteria-compatible: stop generate() when the client leaves."""
+
+    def __init__(self, event: threading.Event) -> None:
+        self.event = event
+
+    def __call__(self, input_ids, scores, **kwargs) -> bool:
+        return self.event.is_set()
+
+
 class AdapterService:
+    """Executes the task Laya picked, loading only what that task needs.
+
+    Residency (see router/residency.py): nothing loads at start-up; each task
+    loads its weights on first use and the previous task's adapter is
+    released on a task change. Use `lease(task)` around select + generation
+    so a concurrent request can never swap weights under a running stream.
+    """
+
     def __init__(self, base_dir: str,
                  anomaly_dir: str,
                  reasoning_dir: str,
                  deepfake_llm_dir: str,
                  deepfake_vision_dir: str,
-                 custom_heads_path: Optional[str] = None) -> None:
-        # All three adapters target the SAME pristine InternVL3-2B base.
-        #   anomaly + reasoning -> one shared PeftModel (hot-swapped)
+                 custom_heads_path: Optional[str] = None,
+                 policy: Optional[str] = None) -> None:
+        # All adapters target the SAME pristine InternVL3-2B base.
+        #   anomaly / reasoning -> LoRA on the shared base, one at a time
         #   deepfake            -> dedicated wrapper (own backbone + heads)
         self.base_dir = base_dir
         self.anomaly_dir = anomaly_dir
@@ -195,123 +220,97 @@ class AdapterService:
         self.deepfake_llm_dir = deepfake_llm_dir
         self.deepfake_vision_dir = deepfake_vision_dir
         self.custom_heads_path = custom_heads_path
-        self._model = None
         self._tokenizer = None
-        self._active: Optional[str] = None
-        self._deepfake = None          # (wrapper, tokenizer)
-        self._deepfake_origin_dirs: Optional[Tuple[str, str]] = None
+        self._stub_backend = _stub_env()
+        self.residency = AdapterResidency(
+            self._make_stub_backend() if self._stub_backend
+            else self._make_real_backend(), policy=policy)
 
-    # -- adapter selection --------------------------------------------
-    def select(self, task: str) -> Dict[str, Any]:
-        """Activate the adapter set for `task`. Returns selection receipt."""
-        t0 = time.perf_counter()
-        try:
-            self._ensure_model()
-        except Exception as exc:
-            if os.getenv("FINAL_STUB_GENERATION", "0") == "1":
-                logger.warning("model unavailable, stub selection: %s", exc)
-                names = {"anomaly": [_ANOMALY],
-                         "reasoning": [_REASONING],
-                         "deepfake": [_DEEPFAKE_LLM, _DEEPFAKE_VISION,
-                                      "custom_heads(wrapper)"],
-                         "general": ["base"]}[task]
-                return {"task": task, "status": 200, "adapters": names,
-                        "mode": "stub",
-                        "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3)}
-            raise
-        if task == "anomaly":
-            self._set_active([_ANOMALY])
-            self._active = _ANOMALY
-            names = [_ANOMALY]
-        elif task == "reasoning":
-            self._set_active([_REASONING])
-            self._active = _REASONING
-            names = [_REASONING]
-        elif task == "deepfake":
-            # Dedicated wrapper owns deepfake end-to-end (own backbone +
-            # submodule LoRA + classifier heads). Top model idles on base.
-            self._set_active([])
-            self._ensure_deepfake()
-            self._active = "deepfake"
-            names = ["deepfake_llm(wrapper)", "deepfake_vision(wrapper)",
-                     "custom_heads(wrapper)"]
-        elif task == "general":
-            self._set_active([])  # plain base model
-            self._active = None
-            names = ["base"]
-        else:
-            raise ValueError(f"unknown task: {task}")
-        return {"task": task, "status": 200, "adapters": names,
-                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3)}
+    # -- residency backends -------------------------------------------
+    def _make_real_backend(self) -> Backend:
+        return Backend(
+            load_base=self._load_base,
+            unload_base=lambda base: None,  # last reference dropped by caller
+            attach_lora=self._attach_lora,
+            detach_lora=self._detach_lora,
+            load_deepfake=self._load_deepfake,
+            unload_deepfake=lambda df: None,
+        )
 
-    def _set_active(self, names: list) -> None:
-        """Activate adapters per tuner layer (peft 0.17-compatible).
+    @staticmethod
+    def _make_stub_backend() -> Backend:
+        """No weights: residency bookkeeping only (UI/demo/tests)."""
+        return Backend(
+            load_base=lambda: "stub-base",
+            unload_base=lambda base: None,
+            attach_lora=lambda base, task: f"stub-peft:{task}",
+            detach_lora=lambda model: "stub-base",
+            load_deepfake=lambda: ("stub-wrapper", None),
+            unload_deepfake=lambda df: None,
+        )
 
-        Layers ignore names missing from their own lora_A, so disjoint
-        adapters (llm vs vision) compose safely; [] = plain base model.
-        """
-        from peft.tuners.tuners_utils import BaseTunerLayer
-        for module in self._model.modules():
-            if isinstance(module, BaseTunerLayer) and hasattr(module, "lora_A"):
-                module.set_adapter([n for n in names if n in module.lora_A])
-        # Model-level tag is only used for config lookup (active_peft_config);
-        # it must name a LOADED adapter even when every layer runs bare.
-        self._model.active_adapter = (
-            names[0] if names else next(iter(self._model.peft_config)))
+    def _lora_dir(self, task: str) -> str:
+        return {_ANOMALY: self.anomaly_dir, _REASONING: self.reasoning_dir}[task]
 
-    def _ensure_model(self) -> None:
-        """Shared PeftModel: pristine base + anomaly + reasoning adapters.
+    def _ensure_tokenizer(self):
+        if self._tokenizer is None:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(self.base_dir,
+                                                trust_remote_code=True)
+            if tok.pad_token is None:
+                tok.pad_token = tok.eos_token
+            self._tokenizer = tok
+        return self._tokenizer
 
-        Only one adapter is active per request (hot-swapped in `select`);
-        `general` runs the bare base. Deepfake lives in its own wrapper.
-        """
-        if self._model is not None:
-            return
-        import warnings
-        from peft import PeftModel
-        from transformers import AutoModel, AutoTokenizer
+    def _load_base(self):
+        """Pristine shared base, no adapter attached."""
+        from transformers import AutoModel
 
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            self.base_dir, trust_remote_code=True)
-        if self._tokenizer.pad_token is None:
-            self._tokenizer.pad_token = self._tokenizer.eos_token
+        tok = self._ensure_tokenizer()
         base = AutoModel.from_pretrained(
             self.base_dir, trust_remote_code=True,
             torch_dtype="auto", device_map="auto",
         )
         # Required by InternVLChatModel.generate(): maps <IMG_CONTEXT> slots
-        # to vision embeddings. Must be set on the BASE model before wrapping
-        # (text-only calls pass pixel_values=None, so no slots are replaced).
+        # to vision embeddings (text-only calls pass pixel_values=None).
         try:
-            base.img_context_token_id = self._tokenizer.convert_tokens_to_ids(
-                "<IMG_CONTEXT>")
+            base.img_context_token_id = tok.convert_tokens_to_ids("<IMG_CONTEXT>")
         except Exception as exc:
             logger.warning("could not set img_context_token_id: %s", exc)
+        base.eval()
+        return base
+
+    def _attach_lora(self, base, task: str):
+        import warnings
+        from peft import PeftModel
+
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             model = PeftModel.from_pretrained(
-                base, self.anomaly_dir,
-                adapter_name=_ANOMALY, is_trainable=False)
-        _assert_attached(caught, _ANOMALY)
-        # Reasoning is a second LoRA on the same base/target modules. PEFT
-        # keeps both loaded; `_set_active` picks exactly one per request.
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            model.load_adapter(self.reasoning_dir, adapter_name=_REASONING,
-                               is_trainable=False)
-        _assert_attached(caught, _REASONING)
+                base, self._lora_dir(task), adapter_name=task,
+                is_trainable=False)
+        _assert_attached(caught, task)
         model.eval()
-        self._model = model
+        return model
 
-    def _ensure_deepfake(self):
+    @staticmethod
+    def _detach_lora(model):
+        """Remove LoRA layers WITHOUT merging: the base stays pristine."""
+        base = model.unload()
+        for attr in ("peft_config", "_hf_peft_config_loaded"):
+            if hasattr(base, attr):
+                try:
+                    delattr(base, attr)
+                except Exception:
+                    pass
+        return base
+
+    def _load_deepfake(self):
         """Dedicated DeepfakeReasoningModel wrapper (own backbone instance).
 
-        Loads the ORIGINAL submodule-relative LoRA safetensors (the training
-        harness wrapped backbone.language_model / .vision_model directly) +
-        the 59 custom-head tensors. Any unmapped key raises — never silent.
+        Loads the ORIGINAL submodule-relative LoRA safetensors + the 59
+        custom-head tensors. Any unmapped key raises — never silent.
         """
-        if self._deepfake is not None:
-            return self._deepfake
         import torch
         from deepfake.loader import load_trained_wrapper
 
@@ -319,15 +318,59 @@ class AdapterService:
             raise RuntimeError(
                 "deepfake custom_heads path is required (FINAL_CUSTOM_HEADS)")
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._deepfake = load_trained_wrapper(
+        return load_trained_wrapper(
             base_dir=self.base_dir,
             llm_adapter_path=self.deepfake_llm_dir,
             vision_adapter_path=self.deepfake_vision_dir,
             heads_path=self.custom_heads_path,
             device=device,
         )
-        self._deepfake_origin_dirs = ("llm_adapter", "vision_adapter")
-        return self._deepfake
+
+    # -- adapter selection --------------------------------------------
+    @staticmethod
+    def adapter_names(task: str) -> list:
+        return {"anomaly": [_ANOMALY],
+                "reasoning": [_REASONING],
+                "deepfake": [_DEEPFAKE_LLM, _DEEPFAKE_VISION, "custom_heads"],
+                "general": ["base"]}.get(task, [])
+
+    def _select_locked(self, task: str) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        swap = self.residency.activate(task)  # ValueError on unknown task
+        return {"task": task, "status": 200,
+                "adapters": self.adapter_names(task),
+                "mode": "stub" if self._stub_backend else "real",
+                "swap": swap.to_dict(),
+                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3)}
+
+    def select(self, task: str) -> Dict[str, Any]:
+        """Activate `task` (loads/evicts as needed). Returns a receipt.
+
+        Standalone use (scripts). Servers should use `lease()` so the swap
+        and the generation that follows are one critical section.
+        """
+        with self.residency.lock:
+            return self._select_locked(task)
+
+    @contextmanager
+    def lease(self, task: str, timeout: Optional[float] = None):
+        """Hold the model for one request: swap to `task`, then generate.
+
+        Raises BusyError if another request keeps the model longer than
+        `timeout` seconds (FINAL_LEASE_TIMEOUT, default 600).
+        """
+        if timeout is None:
+            timeout = float(os.getenv("FINAL_LEASE_TIMEOUT", "600"))
+        if not self.residency.lock.acquire(timeout=timeout):
+            raise BusyError("model busy with another request")
+        try:
+            yield self._select_locked(task)
+        finally:
+            self.residency.lock.release()
+
+    def status(self) -> Dict[str, Any]:
+        return {**self.residency.status(),
+                "mode": "stub" if self._stub_backend else "real"}
 
     # -- deepfake forensic analysis (wrapper path) -------------------------
     def analyze_image_stream(self, image_bytes: bytes, max_new_tokens: int = 512,
@@ -336,12 +379,10 @@ class AdapterService:
                              stub: Optional[bool] = None) -> Generator[Dict[str, Any], None, None]:
         """Full forensic pass: classifier verdict first, then streamed reasoning.
 
-        The trained forensic LM emits <fast>/<planning>/<reasoning>/<reflection>/
-        <conclusion>/<answer> XML tags. A streaming section router sends the
-        deliberation (fast/planning/reasoning/reflection) on the "thinking"
-        channel (rendered collapsed by the client) and the human-readable
-        <conclusion> plus the <answer> verdict on the "token" channel, so
-        callers never see tags and the reply is never empty.
+        Requires `select("deepfake")` / `lease("deepfake")` first. The trained
+        forensic LM emits <fast>/<planning>/<reasoning>/<reflection>/
+        <conclusion>/<answer> tags; deliberation streams on "thinking", the
+        conclusion + verdict on "token".
 
         Event shapes:
           {"event": "verdict", "verdict": "REAL"|"FAKE", "confidence": f,
@@ -351,8 +392,7 @@ class AdapterService:
           {"event": "generation_receipt", ...}
         """
         import io as _io
-        use_stub = (os.getenv("FINAL_STUB_GENERATION", "0") == "1"
-                    if stub is None else stub)
+        use_stub = (_stub_env() or self._stub_backend) if stub is None else stub
         if use_stub:
             yield {"event": "verdict", "verdict": "REAL", "confidence": 0.5,
                    "hotspots": "stub", "spectral": "stub",
@@ -366,7 +406,10 @@ class AdapterService:
         from deepfake.forensics import (build_telemetry_prompt,
                                         extract_forensic_telemetry,
                                         preprocess_image)
-        wrapper, tokenizer = self._ensure_deepfake()
+        if self.residency.deepfake is None:
+            raise RuntimeError("deepfake wrapper not resident; "
+                               "call select('deepfake') first")
+        wrapper, tokenizer = self.residency.deepfake
         device = next(wrapper.parameters()).device
         try:
             img = _Image.open(_io.BytesIO(image_bytes)).convert("RGB")
@@ -400,7 +443,8 @@ class AdapterService:
         prompt_text = build_telemetry_prompt(telemetry)
 
         # Reasoning generation with token streaming (mirrors predict()).
-        vis_tokens = wrapper._get_native_visual_tokens(pv)
+        with torch.no_grad():
+            vis_tokens = wrapper._get_native_visual_tokens(pv)
         inputs_embeds = vis_tokens.to(torch.bfloat16)
         prompt_ids = tokenizer(prompt_text, return_tensors="pt",
                                add_special_tokens=False).input_ids.to(device)
@@ -409,18 +453,17 @@ class AdapterService:
                                    prompt_embeds.to(inputs_embeds.dtype)], dim=1)
         attention_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.long,
                                     device=device)
+        cancel = threading.Event()
+        criteria = [_CancelCriteria(cancel)]
         try:
-            from transformers import StoppingCriteria, StoppingCriteriaList
             stop_ids = tokenizer("</answer>", add_special_tokens=False).input_ids
 
-            class _StopOnAnswer(StoppingCriteria):
-                def __call__(self, input_ids, scores, **kwargs):
-                    tail = input_ids[0, -len(stop_ids):].tolist()
-                    return tail == stop_ids
+            def _stop_on_answer(input_ids, scores, **kwargs):
+                return input_ids[0, -len(stop_ids):].tolist() == stop_ids
 
-            stopping = StoppingCriteriaList([_StopOnAnswer()])
+            criteria.append(_stop_on_answer)
         except Exception:
-            stopping = None
+            pass
         streamer = TextIteratorStreamer(tokenizer, skip_special_tokens=True)
         gen_kwargs: Dict[str, Any] = dict(
             inputs_embeds=inputs_embeds, attention_mask=attention_mask,
@@ -429,37 +472,42 @@ class AdapterService:
             repetition_penalty=repetition_penalty, use_cache=True,
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id,
-            stopping_criteria=stopping,
+            stopping_criteria=_stopping_list(criteria),
         )
         if temperature > 0:
             gen_kwargs["temperature"] = temperature
             gen_kwargs["top_p"] = 0.9
         t0 = time.perf_counter()
-        pre0 = time.perf_counter()
         thread = threading.Thread(
-            target=lambda: self._generate_guarded_lm(wrapper, gen_kwargs, streamer),
+            target=lambda: self._generate_guarded(
+                wrapper.backbone.language_model.generate, gen_kwargs, streamer),
             daemon=True)
         thread.start()
-        prefill_ms = (time.perf_counter() - pre0) * 1000.0
+        prefill_ms = (time.perf_counter() - t0) * 1000.0
         per_token: list = []
         idx = 0
         sectioner = TagSectioner(default="answer")
         visible: list = []
         prev = time.perf_counter()
-        for chunk in streamer:
-            now = time.perf_counter()
-            dt = (now - prev) * 1000.0
-            prev = now
-            per_token.append(dt)
-            idx += 1
-            for channel, text in sectioner.feed(chunk):
-                if channel != "thinking":
-                    visible.append(text)
-                yield {"event": "thinking" if channel == "thinking" else "token",
-                       "index": idx, "text": text,
-                       "latency_ms": round(dt, 3),
-                       "elapsed_ms": round((now - t0) * 1000.0, 3)}
-        thread.join()
+        try:
+            for chunk in streamer:
+                now = time.perf_counter()
+                dt = (now - prev) * 1000.0
+                prev = now
+                per_token.append(dt)
+                idx += 1
+                for channel, text in sectioner.feed(chunk):
+                    if channel != "thinking":
+                        visible.append(text)
+                    yield {"event": "thinking" if channel == "thinking" else "token",
+                           "index": idx, "text": text,
+                           "latency_ms": round(dt, 3),
+                           "elapsed_ms": round((now - t0) * 1000.0, 3)}
+        finally:
+            # Client gone or stream done: stop generate() before the lease
+            # is released, so no swap can happen under a live decode.
+            cancel.set()
+            thread.join(timeout=60)
         elapsed = round((time.perf_counter() - t0) * 1000.0, 3)
         for channel, text in sectioner.flush():  # release any partial-tag carry
             if channel != "thinking":
@@ -487,87 +535,18 @@ class AdapterService:
                                    tok_per_s=idx / max(decode_ms / 1000.0, 1e-9),
                                    per_token_ms=per_token).to_dict()}
 
-    def _generate_guarded_lm(self, wrapper, gen_kwargs: Dict[str, Any],
-                             streamer: Any) -> None:
-        try:
-            wrapper.backbone.language_model.generate(**gen_kwargs)
-        except Exception as exc:
-            logger.warning("deepfake reasoning failed, ending stream: %s\n%s",
-                           exc, traceback.format_exc())
-            gen_kwargs["_worker_error"] = str(exc)
-        finally:
-            try:
-                streamer.end()
-            except Exception:
-                pass
-        self._heads_loaded = True
-
-    # -- streaming generation ------------------------------------------
-    def stream(self, prompt: str, max_new_tokens: int = 256,
-               temperature: float = 0.0, repetition_penalty: float = 1.0,
-               stub: Optional[bool] = None) -> Generator[Dict[str, Any], None, None]:
-        """Yield token events then a final generation receipt.
-
-        Event shapes:
-          {"event": "token", "index": i, "text": tok,
-           "latency_ms": ms-for-this-token, "elapsed_ms": ms-since-start}
-          {"event": "generation_receipt", **GenerationReceipt.to_dict()}
-        """
-        use_stub = (os.getenv("FINAL_STUB_GENERATION", "0") == "1"
-                    if stub is None else stub)
-        if use_stub or self._model is None and self._stub_required():
-            yield from self._stub_stream(prompt, max_new_tokens)
-            return
-        yield from self._real_stream(prompt, max_new_tokens, temperature,
-                                     repetition_penalty)
-
-    def _stub_required(self) -> bool:
-        try:
-            self._ensure_model()
-            return False
-        except Exception as exc:  # weights/GPU absent: stub keeps shape testable
-            logger.warning("model unavailable, stub stream: %s", exc)
-            return True
-
-    def format_prompt(self, task: str, history: list, message: str) -> str:
-        """Training-faithful prompt via the fused tokenizer's own template.
-
-        Bare user text lets the LR-fused base fall back to its logic-rule
-        prior (rule traces, token loops). The adapters were trained under
-        <|im_start|>system framing — reproduce it here.
-        """
-        messages = build_messages(task, history or [], message)
-        try:
-            return self._tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True)
-        except Exception as exc:  # pragma: no cover - very old tokenizers
-            logger.warning("chat template failed, manual framing: %s", exc)
-            parts = []
-            for m in messages:
-                parts.append(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n")
-            parts.append("<|im_start|>assistant\n")
-            return "".join(parts)
-
-    def eos_ids(self) -> list:
-        ids = {self._tokenizer.eos_token_id}
-        try:
-            extra = self._tokenizer.convert_tokens_to_ids("<|im_end|>")
-            if isinstance(extra, int) and extra > 0:
-                ids.add(extra)
-        except Exception:
-            pass
-        return [i for i in ids if i]
-
-    def _generate_guarded(self, gen_kwargs: Dict[str, Any],
-                            streamer: Any) -> None:
+    @staticmethod
+    def _generate_guarded(generate_fn, gen_kwargs: Dict[str, Any],
+                          streamer: Any) -> None:
         """Run generate() off-thread; never leave the SSE iterator hanging.
 
         On worker error the exception is logged and the streamer is ended so
         the consumer sees ... + generation_receipt(partial) + done instead of
         blocking forever.
         """
+        kwargs = {k: v for k, v in gen_kwargs.items() if not k.startswith("_")}
         try:
-            self._model.generate(**gen_kwargs)
+            generate_fn(**kwargs)
         except Exception as exc:
             logger.warning("generation failed, ending stream: %s\n%s",
                            exc, traceback.format_exc())
@@ -577,6 +556,62 @@ class AdapterService:
                 streamer.end()
             except Exception:
                 pass
+
+    # -- streaming generation ------------------------------------------
+    def stream(self, prompt: str, max_new_tokens: int = 256,
+               temperature: float = 0.0, repetition_penalty: float = 1.0,
+               stub: Optional[bool] = None) -> Generator[Dict[str, Any], None, None]:
+        """Yield token events then a final generation receipt.
+
+        Runs on whatever `select()` / `lease()` made resident: the bare base
+        for `general`, base + one LoRA for `anomaly` / `reasoning`.
+
+        Event shapes:
+          {"event": "token", "index": i, "text": tok,
+           "latency_ms": ms-for-this-token, "elapsed_ms": ms-since-start}
+          {"event": "generation_receipt", **GenerationReceipt.to_dict()}
+        """
+        use_stub = (_stub_env() or self._stub_backend) if stub is None else stub
+        if use_stub or self.residency.runner() is None:
+            if not use_stub:
+                logger.warning("no model resident (select() not called?); stub stream")
+            yield from self._stub_stream(prompt, max_new_tokens)
+            return
+        yield from self._real_stream(prompt, max_new_tokens, temperature,
+                                     repetition_penalty)
+
+    def format_prompt(self, task: str, history: list, message: str) -> str:
+        """Training-faithful prompt via the base tokenizer's own template.
+
+        The adapters were trained under <|im_start|>system framing —
+        reproduce it here. Falls back to manual ChatML framing when the
+        tokenizer is unavailable (stub mode) or has no template.
+        """
+        messages = build_messages(task, history or [], message)
+        try:
+            if self._stub_backend:
+                raise RuntimeError("stub mode: no tokenizer")
+            return self._ensure_tokenizer().apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True)
+        except Exception as exc:
+            if not self._stub_backend:
+                logger.warning("chat template failed, manual framing: %s", exc)
+            parts = []
+            for m in messages:
+                parts.append(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n")
+            parts.append("<|im_start|>assistant\n")
+            return "".join(parts)
+
+    def eos_ids(self) -> list:
+        tok = self._ensure_tokenizer()
+        ids = {tok.eos_token_id}
+        try:
+            extra = tok.convert_tokens_to_ids("<|im_end|>")
+            if isinstance(extra, int) and extra > 0:
+                ids.add(extra)
+        except Exception:
+            pass
+        return [i for i in ids if i]
 
     def _stub_stream(self, prompt: str,
                      max_new_tokens: int) -> Generator[Dict[str, Any], None, None]:
@@ -604,44 +639,55 @@ class AdapterService:
     def _real_stream(self, prompt: str, max_new_tokens: int,
                      temperature: float,
                      repetition_penalty: float = 1.0) -> Generator[Dict[str, Any], None, None]:
-        import torch
         from transformers import TextIteratorStreamer
 
-        enc = self._tokenizer(prompt, return_tensors="pt")
-        input_ids = enc["input_ids"].to(self._model.device)
+        tok = self._ensure_tokenizer()
+        model = self.residency.runner()
+        enc = tok(prompt, return_tensors="pt")
+        input_ids = enc["input_ids"].to(model.device)
+        attention_mask = enc.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(model.device)
         t0 = time.perf_counter()
-        pre0 = time.perf_counter()
-        streamer = TextIteratorStreamer(self._tokenizer, skip_special_tokens=True)
-        gen_kwargs = dict(
-            input_ids=input_ids, streamer=streamer,
+        cancel = threading.Event()
+        streamer = TextIteratorStreamer(tok, skip_prompt=False,
+                                        skip_special_tokens=True)
+        gen_kwargs: Dict[str, Any] = dict(
+            input_ids=input_ids, attention_mask=attention_mask,
+            streamer=streamer,
             max_new_tokens=max_new_tokens,
             do_sample=temperature > 0,
             repetition_penalty=repetition_penalty,
             eos_token_id=self.eos_ids(),
-            pad_token_id=self._tokenizer.pad_token_id,
+            pad_token_id=tok.pad_token_id,
+            stopping_criteria=_stopping_list([_CancelCriteria(cancel)]),
         )
         if temperature > 0:
             gen_kwargs["temperature"] = temperature
             gen_kwargs["top_p"] = 0.9
         thread = threading.Thread(
-            target=lambda: self._generate_guarded(gen_kwargs, streamer),
+            target=lambda: self._generate_guarded(model.generate, gen_kwargs,
+                                                  streamer),
             daemon=True)
         thread.start()
-        prefill_ms = (time.perf_counter() - pre0) * 1000.0
+        prefill_ms = (time.perf_counter() - t0) * 1000.0
         per_token: list = []
         idx = 0
         # First yielded chunk includes prefill; per-token timing from 2nd chunk.
         prev = time.perf_counter()
-        for chunk in streamer:
-            now = time.perf_counter()
-            dt = (now - prev) * 1000.0
-            prev = now
-            per_token.append(dt)
-            yield {"event": "token", "index": idx, "text": chunk,
-                   "latency_ms": round(dt, 3),
-                   "elapsed_ms": round((now - t0) * 1000.0, 3)}
-            idx += 1
-        thread.join()
+        try:
+            for chunk in streamer:
+                now = time.perf_counter()
+                dt = (now - prev) * 1000.0
+                prev = now
+                per_token.append(dt)
+                yield {"event": "token", "index": idx, "text": chunk,
+                       "latency_ms": round(dt, 3),
+                       "elapsed_ms": round((now - t0) * 1000.0, 3)}
+                idx += 1
+        finally:
+            cancel.set()  # client disconnected / done: stop decoding now
+            thread.join(timeout=60)
         if gen_kwargs.get("_worker_error"):
             yield {"event": "notice",
                    "text": "Generation hit an error partway; showing what arrived. "
@@ -653,3 +699,12 @@ class AdapterService:
                                    tokens=idx,
                                    tok_per_s=idx / max(decode_ms / 1000.0, 1e-9),
                                    per_token_ms=per_token).to_dict()}
+
+
+def _stub_env() -> bool:
+    return os.getenv("FINAL_STUB_GENERATION", "0") == "1"
+
+
+def _stopping_list(criteria: list):
+    from transformers import StoppingCriteriaList
+    return StoppingCriteriaList(criteria)
