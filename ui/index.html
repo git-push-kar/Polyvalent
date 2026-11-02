@@ -140,6 +140,8 @@
   #view-anomaly { overflow: hidden; }
   .an-layout { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px; width: 100%; min-height: 0; }
   .an-side, .an-main { overflow-y: auto; min-height: 0; }
+  /* Cards keep their content height; the column scrolls instead of squashing charts. */
+  .an-main > *, .an-side > * { flex: 0 0 auto; }
   .an-main { display: flex; flex-direction: column; gap: 16px; padding-bottom: 24px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; box-shadow: var(--shadow); }
   .card h3 { margin: 0 0 10px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
@@ -756,9 +758,20 @@ function updateKpis() {
 
 /* ----- canvases ----- */
 function fitCanvas(cv) {
-  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = Number(cv.getAttribute('height'));
-  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); cv.style.height = h + 'px'; }
-  const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); return [ctx, w, h];
+  // The layout height is pinned once in data-h. Reading it back from the height
+  // attribute made the bitmap size compound with the device pixel ratio on every
+  // redraw, so charts crept taller as they animated; a single pass while the tab
+  // was hidden then collapsed them to nothing.
+  const dpr = window.devicePixelRatio || 1;
+  const design = Number(cv.dataset.h || cv.getAttribute('height')) || 160;
+  cv.dataset.h = String(design);
+  cv.style.height = design + 'px';
+  const w = cv.clientWidth || cv.parentElement.clientWidth || 320;
+  const bw = Math.max(1, Math.round(w * dpr)), bh = Math.max(1, Math.round(design * dpr));
+  if (cv.width !== bw || cv.height !== bh) { cv.width = bw; cv.height = bh; }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return [ctx, w, design];
 }
 function drawAll() { if (!A.tl || !$('view-anomaly').classList.contains('active')) return; drawScore(); drawHeat(); drawTrace(); }
 window.addEventListener('resize', () => requestAnimationFrame(drawAll));
