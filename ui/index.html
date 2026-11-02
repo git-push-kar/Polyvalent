@@ -197,7 +197,6 @@
   /* ---------------- finance ---------------- */
   #view-finance { align-items: center; justify-content: center; padding: 24px; }
   .soon-card { max-width: 520px; text-align: center; }
-  .soon-card .icon { font-size: 40px; }
   .soon-card h2 { margin: 8px 0 6px; }
   .soon-card p { color: var(--muted); }
   .soon-card ul { text-align: left; color: var(--muted); display: inline-block; margin: 6px 0 0; }
@@ -221,9 +220,9 @@
 <header class="top">
   <div class="brand"><div class="logo">P</div>Polyvalent</div>
   <nav class="tabs" role="tablist" aria-label="Workspaces">
-    <button role="tab" id="tab-chat" aria-controls="view-chat" data-view="chat">💬 Chat</button>
-    <button role="tab" id="tab-anomaly" aria-controls="view-anomaly" data-view="anomaly">📈 <span class="lg">Anomaly detection</span><span class="sm">Anomaly</span></button>
-    <button role="tab" id="tab-finance" aria-controls="view-finance" data-view="finance">💼 <span class="lg">Finance portfolio</span><span class="sm">Finance</span> <span class="soon">Soon</span></button>
+    <button role="tab" id="tab-chat" aria-controls="view-chat" data-view="chat">Chat</button>
+    <button role="tab" id="tab-anomaly" aria-controls="view-anomaly" data-view="anomaly"><span class="lg">Anomaly detection</span><span class="sm">Anomaly</span></button>
+    <button role="tab" id="tab-finance" aria-controls="view-finance" data-view="finance"><span class="lg">Finance portfolio</span><span class="sm">Finance</span> <span class="soon">Soon</span></button>
   </nav>
   <div class="spacer"></div>
   <span class="pill badge-stub" id="stubBadge" title="FINAL_STUB_GENERATION=1: placeholder text, no model weights">Demo mode</span>
@@ -239,19 +238,19 @@
           <h2>What can I help with?</h2>
           <p>Laya routes each message to the right specialist and loads only that adapter.</p>
           <div class="chips">
-            <button class="chip" data-prompt="Alice is taller than Bob, and Bob is taller than Carol. Who is the shortest? Explain step by step."><b>🧠 Logic puzzle</b><span>Loads the reasoning adapter</span></button>
-            <button class="chip" data-attach="1" data-prompt="Is this face photo real or fake?"><b>🕵️ Check a face photo</b><span>Attach an image → deepfake adapter</span></button>
-            <button class="chip" data-prompt="Should I take the train or drive to work if it's raining and the train is 10 minutes slower?"><b>⚖️ Decide between options</b><span>Reasoning adapter</span></button>
-            <button class="chip" data-prompt="Explain what a LoRA adapter is in two sentences."><b>💡 Ask anything</b><span>Answered by the base model</span></button>
+            <button class="chip" data-prompt="Alice is taller than Bob, and Bob is taller than Carol. Who is the shortest? Explain step by step."><b>Logic puzzle</b><span>Loads the reasoning adapter</span></button>
+            <button class="chip" data-attach="1" data-prompt="Is this face photo real or fake?"><b>Check a face photo</b><span>Attach an image → deepfake adapter</span></button>
+            <button class="chip" data-prompt="Should I take the train or drive to work if it's raining and the train is 10 minutes slower?"><b>Decide between options</b><span>Reasoning adapter</span></button>
+            <button class="chip" data-prompt="Explain what a LoRA adapter is in two sentences."><b>Ask anything</b><span>Answered by the base model</span></button>
           </div>
         </div>
       </div>
     </div>
     <div class="composer-wrap">
       <div class="composer">
-        <div class="attach-preview" id="attachPreview"><img id="attachImg" alt="attached image preview"><span id="attachName"></span><button id="attachClear" title="Remove image" aria-label="Remove image">✕</button></div>
+        <div class="attach-preview" id="attachPreview"><img id="attachImg" alt="attached image preview"><span id="attachName"></span><button id="attachClear" title="Remove image" aria-label="Remove image">&times;</button></div>
         <div class="composer-row">
-          <button class="icon-btn" id="attachBtn" title="Attach a face image (routes to deepfake analysis)" aria-label="Attach image">📎</button>
+          <button class="icon-btn" id="attachBtn" title="Attach a face image (routes to deepfake analysis)" aria-label="Attach image"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 11.6 12 20.1a5 5 0 0 1-7.1-7.1l8.6-8.6a3.4 3.4 0 1 1 4.8 4.8l-8.3 8.3a1.8 1.8 0 0 1-2.6-2.6l7.6-7.5"/></svg></button>
           <input type="file" id="img" accept="image/*" hidden>
           <button class="icon-btn" id="newChat" title="New chat" aria-label="New chat">＋</button>
           <textarea id="box" rows="1" placeholder="Message Polyvalent…  (Enter to send, Shift+Enter for a new line)"></textarea>
@@ -281,7 +280,7 @@
             <button data-s="4">1×</button><button data-s="12" class="on">3×</button><button data-s="40">10×</button><button data-s="0">Max</button>
           </div>
           <div class="row" style="margin-top:12px">
-            <button class="btn primary" id="playBtn" style="flex:1">▶ Start</button>
+            <button class="btn primary" id="playBtn" style="flex:1">Start</button>
             <button class="btn" id="resetBtn" title="Rewind to the start">↺</button>
           </div>
           <label class="check"><input type="checkbox" id="autoDiag" checked> Diagnose automatically on alarm</label>
@@ -333,7 +332,7 @@
 
         <div class="card hidden" id="incident">
           <div class="incident-head">
-            <h3 style="margin:0">🚨 Incident <span id="incId"></span></h3>
+            <h3 style="margin:0">Incident <span id="incId"></span></h3>
             <span class="sev" id="incSev"></span>
             <span class="pill" id="incSub"></span>
             <span class="spacer"></span>
@@ -353,7 +352,7 @@
         </div>
 
         <div class="card hidden" id="diagnosis">
-          <h3>🧠 Diagnosis <span class="sub" id="diagRoute"></span></h3>
+          <h3>Diagnosis <span class="sub" id="diagRoute"></span></h3>
           <div id="diagStatus" class="typing"></div>
           <div class="report" id="report"></div>
           <details class="think" id="rawWrap" style="margin-top:10px"><summary>Model output (raw)</summary><div class="thinkbody" id="raw"></div></details>
@@ -380,8 +379,7 @@
   <!-- ======================= FINANCE ======================= -->
   <section class="view" id="view-finance" role="tabpanel" aria-labelledby="tab-finance">
     <div class="card soon-card">
-      <div class="icon">💼</div>
-      <h2>Finance portfolio</h2>
+          <h2>Finance portfolio</h2>
       <p>Coming soon. This workspace will host a portfolio adapter routed by Laya, alongside the existing specialists.</p>
       <ul>
         <li>Holdings overview and allocation</li>
@@ -704,7 +702,7 @@ async function loadScenario(id) {
   $('truthLine').innerHTML = sc.fault == null ? 'Unlabelled run' : `Label: <b>IDV(${sc.fault})</b> — ${esc(sc.fault_name)}` + (t.fault_onset != null ? ` · introduced at ${clock(t.fault_onset)}` : '');
   buildHeat();
   A.selected = t.events.length ? t.events[0].evidence.top_anomalous_sensors[0].name : 'XMEAS_7';
-  A.tick = 0; $('playBtn').disabled = false; $('playBtn').textContent = '▶ Start';
+  A.tick = 0; $('playBtn').disabled = false; $('playBtn').textContent = 'Start';
   updateKpis(); drawAll(); renderBars();
 }
 
@@ -716,16 +714,16 @@ $('speed').querySelectorAll('button').forEach(b => b.onclick = () => {
   A.ticksPerSec = Number(b.dataset.s);
 });
 $('playBtn').onclick = () => A.playing ? pause() : play();
-$('resetBtn').onclick = () => { if (!A.tl) return; pause(); A.tick = 0; A.event = null; A.diagnosed.clear(); $('incident').classList.add('hidden'); $('diagnosis').classList.add('hidden'); updateKpis(); drawAll(); renderBars(); $('playBtn').textContent = '▶ Start'; };
+$('resetBtn').onclick = () => { if (!A.tl) return; pause(); A.tick = 0; A.event = null; A.diagnosed.clear(); $('incident').classList.add('hidden'); $('diagnosis').classList.add('hidden'); updateKpis(); drawAll(); renderBars(); $('playBtn').textContent = 'Start'; };
 $('showTruth').onchange = () => { $('truthLine').classList.toggle('hidden', !$('showTruth').checked); $('truthCmp').classList.toggle('hidden', !$('showTruth').checked || !$('truthCmp').innerHTML); drawAll(); };
 
 function play() {
   if (!A.tl) return;
   if (A.tick >= A.tl.n - 1) A.tick = 0;
-  A.playing = true; A.last = performance.now(); A.acc = 0; $('playBtn').textContent = '❚❚ Pause';
+  A.playing = true; A.last = performance.now(); A.acc = 0; $('playBtn').textContent = 'Pause';
   requestAnimationFrame(step);
 }
-function pause() { A.playing = false; if (A.tl) $('playBtn').textContent = A.tick >= A.tl.n - 1 ? '▶ Replay' : '▶ Resume'; }
+function pause() { A.playing = false; if (A.tl) $('playBtn').textContent = A.tick >= A.tl.n - 1 ? 'Replay' : 'Resume'; }
 
 function step(now) {
   if (!A.playing || !A.tl) return;
@@ -892,7 +890,7 @@ function onEvent(ev) {
   $('evTable').querySelectorAll('tr[data-tag]').forEach(r => r.onclick = () => { A.selected = r.dataset.tag; drawAll(); });
   const seq = (e.temporal_sequence || {}).sequence || [];
   $('evSeq').innerHTML = seq.map(s => `<li><span class="t">+${Number(s.relative_time_minutes || 0).toFixed(1)} min</span><span>${esc(s.display_name || s.sensor)} <span class="note">${esc(s.event || '')}</span></span></li>`).join('');
-  $('evLimits').innerHTML = (e.safety_limits_exceeded || []).map(l => `<div class="warnbox">⚠ ${esc(l.limit_name)}: ${fmt(l.current)} vs limit ${fmt(l.threshold)} ${esc(l.unit || '')}</div>`).join('');
+  $('evLimits').innerHTML = (e.safety_limits_exceeded || []).map(l => `<div class="warnbox">${esc(l.limit_name)}: ${fmt(l.current)} vs limit ${fmt(l.threshold)} ${esc(l.unit || '')}</div>`).join('');
   $('diagnosis').classList.add('hidden');
   if ($('autoDiag').checked && !A.diagnosed.has(e.event_id)) diagnose();
   $('incident').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
