@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -54,7 +55,25 @@ class Scenario:
 
 
 def fault_onset() -> int:
-    return int(os.getenv("FINAL_TEP_FAULT_ONSET", "160"))
+    """Sample index where the labelled fault starts (0-based).
+
+    Precedence: FINAL_TEP_FAULT_ONSET, then ``dataset.json`` shipped with the
+    test set (the Rieth export starts faults after 1 h = sample 20, the Braatz
+    files after 8 h = sample 160), then the historical default of 160.
+    """
+    env = os.getenv("FINAL_TEP_FAULT_ONSET", "").strip()
+    if env:
+        return int(env)
+    root = dataset_dir()
+    if root is not None:
+        meta = root / "dataset.json"
+        if meta.is_file():
+            try:
+                return int(json.loads(meta.read_text(encoding="utf-8"))
+                           .get("fault_onset", 160))
+            except (ValueError, TypeError, OSError):
+                pass
+    return 160
 
 
 def dataset_dir() -> Optional[Path]:
@@ -97,11 +116,13 @@ def discover() -> List[Scenario]:
                                 source="dataset", path=str(p), run=run))
         out.sort(key=lambda s: (s.fault if s.fault is not None else 99,
                                 s.run or 0, s.label))
-    if not out:
-        out = [Scenario(id=f"synthetic-{k}", label=f"[SYNTHETIC] {v}",
-                        fault=k, source="synthetic")
-               for k, v in ((4, FAULTS[4]), (6, FAULTS[6]), (5, FAULTS[5]),
-                            (0, FAULTS[0]))]
+    # Synthetic runs stay listed next to a real test set: they are the
+    # "inject a fault" option, the dataset runs are the real ones. Their ids
+    # are synthetic-*, so they never collide with the ds-* dataset ids.
+    out += [Scenario(id=f"synthetic-{k}", label=f"[SYNTHETIC] {v}",
+                     fault=k, source="synthetic")
+            for k, v in ((4, FAULTS[4]), (6, FAULTS[6]), (5, FAULTS[5]),
+                         (0, FAULTS[0]))]
     return out
 
 
@@ -168,15 +189,28 @@ def _load_csv(p: Path, run: Optional[int]) -> np.ndarray:
     return np.asarray(rows, dtype=np.float64)
 
 
-def baseline_from_dataset() -> Optional[np.ndarray]:
-    """Fault-free test run (fault 0) if the dataset ships one."""
+def baseline_from_dataset(exclude: Optional[str] = None) -> Optional[np.ndarray]:
+    """A fault-free test run (fault 0), skipping ``exclude``.
+
+    ``exclude`` matters: a fault-free run must never calibrate the detector on
+    itself, or its own slow drift looks like an anomaly later in the run.
+    """
+    skip = Path(exclude).resolve() if exclude else None
+    runs = []
     for s in discover():
-        if s.source == "dataset" and s.fault == 0:
-            try:
-                return load(s)
-            except Exception:
-                return None
-    return None
+        if s.source != "dataset" or s.fault != 0:
+            continue
+        if skip is not None and s.path and Path(s.path).resolve() == skip:
+            continue
+        try:
+            runs.append(load(s))
+        except Exception:
+            continue
+    if not runs:
+        return None
+    # Concatenate: the spread between fault-free runs is real operating
+    # variance, and calibrating on it keeps normal-run drift from alarming.
+    return np.concatenate(runs, axis=0)
 
 
 def synthetic_run(fault: int, n: int = 960, seed: int = 7) -> np.ndarray:

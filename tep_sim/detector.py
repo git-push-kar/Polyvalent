@@ -50,9 +50,9 @@ def run(scenario: Scenario, cfg: Optional[DetectorConfig] = None) -> Dict[str, A
     t0 = time.perf_counter()
     x = load(scenario)
     onset = fault_onset()
-    baseline = baseline_from_dataset() if scenario.source == "dataset" else None
-    if baseline is not None and scenario.fault == 0:
-        baseline = None  # don't calibrate a run on itself
+    # Never calibrate a fault-free run on itself: use another normal run.
+    baseline = (baseline_from_dataset(exclude=scenario.path)
+                if scenario.source == "dataset" else None)
     timeline = _builtin(x, baseline, onset, cfg, scenario)
     ext = _external(x, timeline, cfg, scenario)
     if ext is not None:

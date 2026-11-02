@@ -152,11 +152,23 @@ Use `--workers 1`. Each worker process would load its own copy of the weights.
    - per-run CSVs with 52 sensor columns, with the fault number in the file name (`fault4_run1.csv`)
    - `.npy` arrays shaped (T, 52)
 
-   For the Rieth et al. (2017) dataset, split the large files first:
+   **This repo ships the Rieth et al. (2017) TEP testing set**, split into per-run CSVs
+   under `data/tep_test/`: `fault0_run{1,2,3}.csv` (fault-free) plus
+   `fault01..fault20_run{1,2,3}.csv`, 960 samples x 52 sensors each, ~22 MB in total.
+   They were split from
+   `...nomaly\dataaw
+ormal\TEP_FaultFree_Testing.csv` and
+   `...nomaly\dataawaults\TEP_Faulty_Testing.csv`; the source export is
+   untouched. `data/tep_test/dataset.json` records that provenance and the fault
+   onset (sample 20 = 1 h in this export, not the 8 h of the Braatz files).
+   To split more runs from the same sources:
    ```powershell
-   python scripts/prepare_tep_testset.py --src TEP_FaultFree_Testing.csv TEP_Faulty_Testing.csv --out data/tep_test --runs 1
+   python scripts/prepare_tep_testset.py --src TEP_FaultFree_Testing.csv TEP_Faulty_Testing.csv --out data/tep_test --runs 1 2 3
    ```
-   If no dataset is found, the tab offers a few clearly labelled **synthetic** runs so the UI can still be tried. They are not TEP physics.
+   The four **synthetic** runs stay in the picker as well (labelled `[SYNTHETIC]`):
+   they are the *inject a fault* option, the dataset runs are the real ones. They are
+   not TEP physics. Fault onset comes from `FINAL_TEP_FAULT_ONSET` if set, else
+   `dataset.json`, else 160.
 2. **Detection.** `POST /anomaly/run` replays the run through a detector:
    - With `FINAL_ANOMALY_REPO` set, it uses the trained `TEPApp` detector (LSTM-AE + CVA). That integration follows the API in the integration guide but has not been run against the real repo yet. If it fails, the service falls back to the built-in detector and the UI says so.
    - Otherwise it uses the built-in statistical detector: z-scores against a fault-free baseline, a rolling mean-square score, a threshold calibrated on normal data, and 6 consecutive alarms to confirm an event.
