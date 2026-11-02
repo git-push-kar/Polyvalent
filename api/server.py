@@ -417,6 +417,7 @@ class ChatRequest(BaseModel):
     temperature: float = 0.0
     repetition_penalty: float = 1.1  # mild loop-breaker for chat
     stub: Optional[bool] = None
+    deep_thinking: bool = False  # UI toggle: pin the message to the reasoning (LR) adapter
 
 
 # Canned notices are UI feedback, not dialogue. Clients (including cached
@@ -443,6 +444,15 @@ def _chat_stream(req: ChatRequest):
 
     # Laya only — it is the sole router by design.
     decision = _route(payload)
+
+    # UI toggle: "deep thinking" pins the message to the reasoning (LR)
+    # adapter. An attached image still wins — the forensic judge needs pixels.
+    if req.deep_thinking and "image_base64" not in payload:
+        decision.task = "reasoning"
+        decision.confidence = 1.0
+        decision.reason = "manual:deep-thinking"
+        decision.abstained = False
+
     log_record: Dict[str, Any] = {"message": req.message,
                                   "routing": decision.to_dict()}
 

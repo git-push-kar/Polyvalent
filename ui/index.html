@@ -112,6 +112,7 @@
   .attach-preview img { height: 44px; border-radius: 8px; border: 1px solid var(--border); }
   .attach-preview button { border: 0; background: none; color: var(--muted); }
   .composer-row { display: flex; align-items: flex-end; gap: 6px; }
+  .icon-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
   .icon-btn { border: 0; background: transparent; width: 38px; height: 38px; border-radius: 10px; font-size: 18px; color: var(--muted); flex: none; }
   .icon-btn:hover { background: var(--panel-2); }
   #box { flex: 1; resize: none; border: 0; background: transparent; padding: 8px 4px; max-height: 180px; outline: none; }
@@ -239,10 +240,11 @@
           <input type="file" id="img" accept="image/*" hidden>
           <button class="icon-btn" id="newChat" title="New chat" aria-label="New chat">＋</button>
           <textarea id="box" rows="1" placeholder="Message Polyvalent…  (Enter to send, Shift+Enter for a new line)"></textarea>
+          <button class="icon-btn" id="deepThink" aria-pressed="false" title="Deep thinking — pin this message to the reasoning adapter" aria-label="Toggle deep thinking">🧠</button>
           <button class="send" id="send" aria-label="Send">↑</button>
         </div>
       </div>
-      <div class="hint">Routing is automatic: general chat → base model · logic &amp; decisions → reasoning adapter · face images → deepfake adapter · TEP faults → anomaly adapter.</div>
+      <div class="hint">Routing is automatic: general chat → base model · logic &amp; decisions → reasoning adapter · face images → deepfake adapter · TEP faults → anomaly adapter. 🧠 Deep thinking pins the next messages to the reasoning adapter.</div>
     </div>
   </section>
 
@@ -488,6 +490,7 @@ window.addEventListener('hashchange', () => showView(location.hash.slice(1)));
 /* ============================== CHAT ============================== */
 const box = $('box'), sendBtn = $('send'), thread = $('thread'), logEl = $('log');
 let chatHistory = [], attached = null, controller = null;
+let deepThink = false;  // toggle: route every message to the reasoning adapter
 
 function autosize() { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight, 180) + 'px'; }
 box.addEventListener('input', autosize);
@@ -508,6 +511,15 @@ $('img').onchange = () => {
 };
 function clearAttachment() { attached = null; $('img').value = ''; $('attachPreview').style.display = 'none'; }
 $('attachClear').onclick = clearAttachment;
+$('deepThink').onclick = () => {
+  deepThink = !deepThink;
+  const b = $('deepThink');
+  b.classList.toggle('on', deepThink);
+  b.setAttribute('aria-pressed', String(deepThink));
+  b.title = deepThink ? 'Deep thinking ON — messages go to the reasoning adapter'
+                      : 'Deep thinking — pin this message to the reasoning adapter';
+  box.focus();
+};
 $('newChat').onclick = () => {
   if (controller) controller.abort();
   chatHistory = []; thread.innerHTML = ''; thread.appendChild(emptyState); emptyState.style.display = '';
@@ -580,12 +592,14 @@ async function ask() {
   let gotAnswer = false, gotNotice = false, verdictLine = '', started = false;
   const begin = () => { if (!started) { started = true; ui.ans.classList.remove('typing'); ui.ans.textContent = ''; ui.ans.classList.add('cursor'); } };
   try {
+    const forced = deepThink;  // captured per request, so a mid-stream toggle cannot mix
     const body = { message, history: chatHistory.slice(-6), max_new_tokens: 768 };
+    if (forced) body.deep_thinking = true;
     if (img) body.image_base64 = img.b64;
     await sse('/chat/stream', body, ev => {
       switch (ev.event) {
         case 'route':
-          setRoute(ui, ev.task, 'routed by Laya');
+          setRoute(ui, ev.task, forced ? 'deep thinking' : 'routed by Laya');
           ui.ans.textContent = ev.task === 'general' ? 'Thinking…' : `Loading ${TASK_LABEL[ev.task] || ev.task}…`;
           break;
         case 'adapter': {
