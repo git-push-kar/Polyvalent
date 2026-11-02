@@ -126,7 +126,9 @@
   .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
   .switch .label { font-size: 11px; line-height: 1.1; color: var(--muted); white-space: nowrap; }
   .switch input:checked ~ .label { color: var(--accent); }
-  .icon-btn { border: 0; background: transparent; width: 38px; height: 38px; border-radius: 10px; font-size: 18px; color: var(--muted); flex: none; }
+  .icon-btn { display: inline-flex; align-items: center; justify-content: center;
+    border: 0; background: transparent; width: 38px; height: 38px; border-radius: 10px;
+    font-size: 18px; color: var(--muted); flex: none; }
   .icon-btn:hover { background: var(--panel-2); }
   #box { flex: 1; resize: none; border: 0; background: transparent; padding: 8px 4px; max-height: 180px; outline: none; }
   .send { border: 0; background: var(--accent); color: #fff; height: 38px; min-width: 38px; padding: 0 14px;
