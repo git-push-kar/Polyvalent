@@ -15,11 +15,14 @@ the same pristine base:
 | `deepfake` | `C:\Users\Admin\Desktop\LY_C68\deepfake_project\runs\intern_v2_ground\adapters` | `llm_adapter/` (r=64), `vision_adapter/` (r=16), `custom_heads/custom_heads.safetensors` |
 | `general` | — | pristine base, no adapter |
 
-`anomaly` and `reasoning` share one `PeftModel` but attach lazily: only the
-LoRA for the routed specialist is loaded, and it stays cached for hot-swapping
-on later turns. `general` never loads a LoRA. `deepfake` runs in the dedicated
-`DeepfakeReasoningModel` wrapper (its classifier heads have no InternVL
-counterpart).
+Adapters load lazily, on the first request Laya routes to their task
+(`router/residency.py`). At most one of `anomaly` / `reasoning` is attached
+to the shared base at a time. A task change detaches the old LoRA (unwrapped,
+never merged) and attaches the new one. `general` runs the bare base.
+`deepfake` runs in the dedicated `DeepfakeReasoningModel` wrapper (its
+classifier heads have no InternVL counterpart). Under the default
+`FINAL_ADAPTER_POLICY=swap`, the wrapper and the shared base are never
+resident together.
 
 Override any path with `FINAL_BASE_DIR`, `FINAL_ANOMALY_DIR`,
 `FINAL_REASONING_DIR`, `FINAL_DEEPFAKE_LLM_DIR`,
