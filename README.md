@@ -81,6 +81,8 @@ follow-up such as "Explain that verdict" is routed again (normally `BASE`) and
 receives the recorded analysis — not a second forensic pass; an explicit rerun
 is what sends it back to `DEEPFAKE`.
 
+**Saved chats.** Use **Chat history** to reopen a conversation or **New chat** to start another. Completed replies and attachment rejection messages are saved locally in `data/chat_history.sqlite3`. Set `FINAL_CHAT_DB` to choose another path. The browser remembers the chat IDs, titles and last selection for this origin. Reopening a chat restores its transcript, uploads and recorded forensic results. Upload positions remain stable across restarts. This feature applies to the Chat tab only.
+
 Chat routes one image per turn. A current upload or image ID takes priority.
 Within six transcript entries of an upload, an implicit follow-up can use the
 active image. Later in the same conversation, an explicit reference such as
@@ -288,6 +290,8 @@ The JSON store tracks cash balance, equity, cumulative fees, per-holding share c
 |---|---|---|
 | GET | `/` | web UI |
 | POST | `/chat/stream` | end-user chat (SSE) |
+| GET | `/chat/history/{conversation_id}` | saved transcript and upload metadata |
+| GET | `/chat/history/{conversation_id}/images/{image_id}` | original uploaded image |
 | POST | `/route/laya/predict` | research endpoint with full routing and generation receipts (SSE) |
 | GET | `/adapters/status` | what is loaded, the policy, and recent swaps |
 | POST | `/adapters/release` | unload everything |

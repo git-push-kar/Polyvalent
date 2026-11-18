@@ -430,3 +430,29 @@ def test_population_question_does_not_require_an_upload():
     from router.conversations import expects_image
     assert not expects_image("How many people live in France?")
     assert expects_image("How many people are visible?")
+
+
+def test_saved_chat_survives_reopening_database(tmp_path):
+    db = tmp_path / "history.sqlite3"
+    cid = "saved-portrait"
+    srv._CONVERSATIONS = ConversationStore(db)
+    raw = _sample_png_b64()
+    first = chat_stream("Is this face real or fake?", conversation_id=cid, image_base64=raw)
+    assert first[-1]["saved"]
+    recorded = next(e for e in first if e["event"] == "analysis_saved")
+    chat_stream("what about them?", conversation_id=cid, image_base64="invalid")
+    srv._CONVERSATIONS = ConversationStore(db)
+    saved = client.get(f"/chat/history/{cid}").json()
+    assert [u["id"] for u in saved["uploads"]] == ["img_1", "img_2"]
+    assert len(saved["turns"]) == 4 and saved["turns"][0]["upload_id"] == "img_1"
+    assert saved["turns"][1]["image_id"] == recorded["image_id"]
+    assert client.get(f"/chat/history/{cid}/images/img_1").content == base64.b64decode(raw)
+    assert client.get(f"/chat/history/{cid}/images/img_2").status_code == 404
+    assert client.get("/chat/history/another-chat").status_code == 404
+    continuation = chat_stream("Explain the verdict for img_1", conversation_id=cid)
+    ctx = next(e for e in continuation if e["event"] == "context")
+    assert ctx["analysis_id"] == recorded["analysis_id"]
+    assert continuation[-1]["saved"]
+    srv._CONVERSATIONS = ConversationStore(db)
+    assert len(client.get(f"/chat/history/{cid}").json()["turns"]) == 6
+    assert srv.get_conversations().get(cid).next_asset_id() == "img_3"

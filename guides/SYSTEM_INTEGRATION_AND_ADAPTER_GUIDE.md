@@ -223,6 +223,10 @@ from the Laya choice criteria; with the support guard, inputs fitting no
 specialist (including plain chat) go to `general`, and text-only deepfake
 requests ask for an image without loading the deepfake wrapper.
 
+#### Chat history in the single-worker demo
+
+The Chat tab reuses the saved conversation ID on `POST /chat/stream`. Before confirming a completed reply, the server commits the transcript, selected image ID, upload order and image-linked forensic analyses to SQLite. Image bytes are stored separately in the same transaction. On the first access after restart, the server restores that state and uses the usual LAYA routing and generation context limits. Opening a saved transcript does not run inference. The browser keeps the conversation picker and last selection in local storage. The default database is `data/chat_history.sqlite3`, configurable with `FINAL_CHAT_DB`. The anomaly and finance tabs retain their existing workflows.
+
 #### LR (reasoning) adapter load conditions
 
 The LR LoRA is loaded lazily by `select("reasoning")`; it is not part of

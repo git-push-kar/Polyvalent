@@ -42,7 +42,7 @@ from typing import Any, AsyncIterator, Dict, Iterator, List, Literal, Optional
 import anyio
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import Response, FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -107,7 +107,7 @@ def get_laya() -> LayaRouter:
 
 
 _TRAINED: Optional[TrainedLayaRouter] = None
-_CONVERSATIONS = ConversationStore()
+_CONVERSATIONS = ConversationStore(Path(os.getenv("FINAL_CHAT_DB") or _REPO / "data" / "chat_history.sqlite3"))
 
 
 def get_trained_router() -> TrainedLayaRouter:
@@ -510,12 +510,22 @@ def _routing_trace(decision) -> Dict[str, Any]:
 
 
 def _chat_stream(req: ChatRequest):
-    service = get_service()
     store = get_conversations()
-
-    conversation_id = ((req.conversation_id or "").strip()
-                       or f"chat_{uuid.uuid4().hex[:12]}")
+    conversation_id = (req.conversation_id or "").strip() or f"chat_{uuid.uuid4().hex}"
     conv = store.get_or_create(conversation_id)
+    if not conv.request_lock.acquire(blocking=False):
+        yield _sse({"event": "notice", "text": "A reply is already in progress in this chat."})
+        yield _sse({"event": "done"})
+        return
+    try:
+        yield from _chat_turn(req, store, conv)
+    finally:
+        conv.request_lock.release()
+
+
+def _chat_turn(req, store, conv):
+    service = get_service()
+    conversation_id = conv.id
     # A client that keeps its own transcript can seed a fresh conversation;
     # once the server has turns, the server's history is the single source.
     if not conv.turns and req.history:
@@ -523,6 +533,7 @@ def _chat_stream(req: ChatRequest):
 
     # -- attachments become trusted, server-side assets -----------------
     attached_asset = None
+    upload_id = None
     attached_now = False
 
     if req.image_base64 is not None:
@@ -535,6 +546,7 @@ def _chat_stream(req: ChatRequest):
         attached_asset = store.add_image(conversation_id, asset_id, raw,
                                          media_type=req.media_type or "")
         attached_now = True
+        upload_id = attached_asset.id
         store.set_active_image(conversation_id, attached_asset.id)
     # Resolve relative to the newly uploaded image, or to the current selection.
     named_id, reference_error = conv.resolve_image(req.message)
@@ -564,14 +576,15 @@ def _chat_stream(req: ChatRequest):
         image_id = selected.id if selected else None
         if image_id in conv.upload_ids:
             yield _sse(conv.selection_event(image_id))
-        store.add_turn(conversation_id, "user", req.message, image_id=image_id)
+        store.add_turn(conversation_id, "user", req.message, image_id=image_id, upload_id=upload_id)
         store.add_turn(conversation_id, "assistant", reply, image_id=image_id)
+        store.save(conversation_id)
         yield _sse({"event": "notice" if rejected else "token", "text": reply,
                     "image_id": image_id, "conversation_id": conversation_id})
         _log_chat_run({"conversation_id": conversation_id, "message": req.message,
                        "active_image_id": image_id, "attachment": attachment,
                        "outcome": "image-unusable" if rejected else "image-status"})
-        yield _sse({"event": "done", "conversation_id": conversation_id})
+        yield _sse({"event": "done", "conversation_id": conversation_id, "saved": True})
         return
 
     # -- routing: LAYA's five-field state, or the explicit thinking pin --
@@ -768,13 +781,34 @@ def _chat_stream(req: ChatRequest):
     # One persistent transcript, updated only after the answer exists.
     turn_kind = "analysis" if task == "deepfake" else "chat"
     image_id = target_asset.id if target_asset else None
-    store.add_turn(conversation_id, "user", req.message, kind=turn_kind, image_id=image_id)
+    store.add_turn(conversation_id, "user", req.message, kind=turn_kind, image_id=image_id, upload_id=upload_id)
     answer = "".join(answer_parts).strip()
     if answer:
         store.add_turn(conversation_id, "assistant", answer, kind=turn_kind, image_id=image_id)
+    store.save(conversation_id)
     _log_chat_run({**log_record, "outcome": "answered", **gen,
                    "conversation_id": conversation_id})
-    yield _sse({"event": "done", "conversation_id": conversation_id})
+    yield _sse({"event": "done", "conversation_id": conversation_id, "saved": True})
+
+
+@app.get("/chat/history/{conversation_id}")
+def chat_history(conversation_id: str):
+    conv = get_conversations().get(conversation_id)
+    if conv is None:
+        raise HTTPException(404, "Chat not found")
+    return {"conversation_id": conv.id, "turns": list(conv.turns),
+            "uploads": [{"id": a.id, "usable": a.usable}
+                        for a in conv.assets.values() if a.id in conv.upload_ids]}
+
+
+@app.get("/chat/history/{conversation_id}/images/{image_id}")
+def chat_history_image(conversation_id: str, image_id: str):
+    conv = get_conversations().get(conversation_id)
+    asset = conv.assets.get(image_id) if conv else None
+    if asset is None or not asset.usable:
+        raise HTTPException(404, "Image not available")
+    return Response(asset.data, media_type=asset.media_type if asset.media_type in {"image/jpeg", "image/png", "image/webp", "image/bmp"} else "application/octet-stream",
+                    headers={"X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/chat/stream")

@@ -22,10 +22,14 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
+import sqlite3
+from contextlib import closing
+from pathlib import Path
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
@@ -223,6 +227,7 @@ class Conversation:
         self.assets: Dict[str, Asset] = {}
         self.active_image_id: Optional[str] = None
         self.analyses: List[Analysis] = []
+        self.request_lock = threading.Lock()
         self._asset_seq = 0
         self.upload_ids: List[str] = []
 
@@ -323,7 +328,8 @@ class Conversation:
         return asset.id if asset else None
 
     # -- turns ----------------------------------------------------------
-    def add_turn(self, role: str, content: str, kind: str = "chat", image_id: Optional[str] = None) -> None:
+    def add_turn(self, role: str, content: str, kind: str = "chat", image_id: Optional[str] = None,
+                 upload_id: Optional[str] = None) -> None:
         text = (content or "").strip()
         if not text:
             return
@@ -333,6 +339,7 @@ class Conversation:
             "ts": round(time.time(), 3),
             "kind": kind,
             "image_id": image_id,
+            "upload_id": upload_id,
         })
         self.updated_at = time.time()
 
@@ -369,22 +376,73 @@ class Conversation:
 class ConversationStore:
     """Process-wide conversation state (survives adapter swaps by design)."""
 
-    def __init__(self) -> None:
+    def __init__(self, database: Optional[Path] = None) -> None:
+        self.database = database
         self._lock = threading.RLock()
         self._conversations: Dict[str, Conversation] = {}
 
-    # -- lifecycle ------------------------------------------------------
-    def get_or_create(self, conversation_id: str) -> Conversation:
+    def _connect(self):
+        self.database.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(self.database)
+        db.execute("CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, state TEXT NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS chat_images "
+                   "(chat TEXT, id TEXT, digest TEXT, data BLOB, PRIMARY KEY(chat,id))")
+        return db
+
+    def save(self, conversation_id: str) -> None:
+        if self.database is None:
+            return
+        with self._lock, closing(self._connect()) as db, db:
+            conv = self._conversations[conversation_id]
+            state = {
+                "turns": conv.turns, "active_image_id": conv.active_image_id,
+                "upload_ids": conv.upload_ids, "asset_seq": conv._asset_seq,
+                "created_at": conv.created_at, "updated_at": conv.updated_at,
+                "analyses": [asdict(a) for a in conv.analyses],
+                "assets": [{k: v for k, v in vars(a).items() if k != "data"}
+                           for a in conv.assets.values()],
+            }
+            for asset in conv.assets.values():
+                if asset.data:
+                    # A stable upload is written once, even on long conversations.
+                    present = db.execute("SELECT digest FROM chat_images WHERE chat=? AND id=?",
+                                         (conv.id, asset.id)).fetchone()
+                    if present != (asset.sha256,):
+                        db.execute("INSERT OR REPLACE INTO chat_images VALUES (?,?,?,?)",
+                                   (conv.id, asset.id, asset.sha256, asset.data))
+            db.execute("INSERT OR REPLACE INTO chats VALUES (?,?)",
+                       (conv.id, json.dumps(state, ensure_ascii=False)))
+
+    def get(self, conversation_id: str) -> Optional[Conversation]:
         with self._lock:
             conv = self._conversations.get(conversation_id)
+            if conv is not None or self.database is None or not self.database.exists():
+                return conv
+            with closing(self._connect()) as db:
+                row = db.execute("SELECT state FROM chats WHERE id=?", (conversation_id,)).fetchone()
+                if row is None:
+                    return None
+                state = json.loads(row[0])
+                images = dict(db.execute("SELECT id,data FROM chat_images WHERE chat=?", (conversation_id,)))
+            conv = Conversation(conversation_id)
+            conv.turns = state["turns"]
+            conv.active_image_id = state["active_image_id"]
+            conv.upload_ids = state["upload_ids"]
+            conv._asset_seq = state["asset_seq"]
+            conv.created_at = state["created_at"]
+            conv.updated_at = state["updated_at"]
+            conv.analyses = [Analysis(**a) for a in state["analyses"]]
+            conv.assets = {a["id"]: Asset(**a, data=images.get(a["id"], b"")) for a in state["assets"]}
+            self._conversations[conversation_id] = conv
+            return conv
+
+    def get_or_create(self, conversation_id: str) -> Conversation:
+        with self._lock:
+            conv = self.get(conversation_id)
             if conv is None:
                 conv = Conversation(conversation_id)
                 self._conversations[conversation_id] = conv
             return conv
-
-    def get(self, conversation_id: str) -> Optional[Conversation]:
-        with self._lock:
-            return self._conversations.get(conversation_id)
 
     def ids(self) -> List[str]:
         with self._lock:
@@ -522,6 +580,7 @@ class ConversationStore:
             return analysis
 
     def add_turn(self, conversation_id: str, role: str, content: str,
-                 kind: str = "chat", image_id: Optional[str] = None) -> None:
+                 kind: str = "chat", image_id: Optional[str] = None,
+                 upload_id: Optional[str] = None) -> None:
         with self._lock:
-            self.get_or_create(conversation_id).add_turn(role, content, kind=kind, image_id=image_id)
+            self.get_or_create(conversation_id).add_turn(role, content, kind=kind, image_id=image_id, upload_id=upload_id)
