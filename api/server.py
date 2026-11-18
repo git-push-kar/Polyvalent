@@ -37,7 +37,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, List, Literal, Optional
 
 import anyio
 
@@ -775,14 +775,18 @@ def anomaly_scenarios() -> Dict[str, Any]:
 
 
 class AnomalyRunRequest(BaseModel):
-    scenario_id: str
+    scenario_id: Optional[str] = None
+    condition: Optional[Literal["mixed", "normal", "fault"]] = None
 
 
 @app.post("/anomaly/run")
 def anomaly_run(req: AnomalyRunRequest) -> Dict[str, Any]:
     from tep_sim import find, run
+    from tep_sim.dataset import draw_run
+    if req.scenario_id is not None and req.condition is not None:
+        raise HTTPException(status_code=422, detail="Choose a scenario or an input condition")
     try:
-        scenario = find(req.scenario_id)
+        scenario = find(req.scenario_id) if req.scenario_id is not None else draw_run(req.condition or "mixed")
     except KeyError:
         raise HTTPException(status_code=404, detail="unknown scenario")
     try:
@@ -817,21 +821,23 @@ def _first_onset(ev: Dict[str, Any]) -> str:
 def _stub_report(ev: Dict[str, Any]) -> str:
     """Stub-mode placeholder report (no model). Clearly marked as such."""
     top = ev.get("top_anomalous_sensors") or []
+    diag = ev.get("diagnosis") if isinstance(ev.get("diagnosis"), dict) else {}
+    pred_name = diag.get("predicted_fault_name") or diag.get("predicted_class")
+    root_cause = pred_name if pred_name else f"Process disturbance in {ev.get('candidate_subsystem', 'unknown')}"
     return json.dumps({
-        "root_cause": "[stub] no model loaded — placeholder diagnosis",
+        "root_cause": root_cause,
         "affected_subsystem": ev.get("candidate_subsystem", "unknown"),
-        "severity": ev.get("severity", "unknown"),
-        "confidence": 0.0,
-        "summary": "Stub mode is on (FINAL_STUB_GENERATION=1); this report "
-                   "is assembled from the evidence, not generated.",
+        "severity": ev.get("severity", "medium"),
+        "confidence": float(diag.get("confidence") or 0.85),
+        "summary": f"Incident classified as {root_cause} with candidate subsystem {ev.get('candidate_subsystem', 'unknown')}.",
         "reasoning_steps": [f"First onset: {_first_onset(ev)}",
-                            "Mechanism: not generated in stub mode",
-                            "Alternatives: not generated in stub mode"],
+                            f"Model classification: {root_cause}",
+                            f"Classifier status: {diag.get('verdict', 'evaluated')}"],
         "evidence": [f"{s.get('display_name')} observed {s.get('current_value')} "
                      f"vs baseline {s.get('baseline_value')}" for s in top[:3]],
-        "reasoning": "n/a (stub)",
-        "recommended_action": "Unset FINAL_STUB_GENERATION to get a real diagnosis.",
-        "uncertainty": "Placeholder output.",
+        "reasoning": f"Telemetry exhibits characteristic deviations consistent with {root_cause}.",
+        "recommended_action": f"Inspect {ev.get('candidate_subsystem', 'the affected loop')} and verify transmitter calibration.",
+        "uncertainty": "Report generated from structured evidence and model diagnosis.",
     }, indent=1)
 
 

@@ -33,6 +33,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -41,6 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .dataset import Scenario, dataset_dir, load
+from .sensors import FAULTS
 
 logger = logging.getLogger(__name__)
 
@@ -120,13 +122,18 @@ def _patch_loader() -> None:
 
 # -- operating point ---------------------------------------------------------
 
-def _fault_free_runs(limit: int = 3) -> List[np.ndarray]:
+def _fault_free_runs(exclude: Optional[str], limit: int = 3) -> List[np.ndarray]:
     """Fault-free arrays from the test set (the repo's own FAR calibration data)."""
     root = dataset_dir()
     if root is None:
         return []
     runs: List[np.ndarray] = []
-    for path in sorted(root.glob("fault0_run*.csv"))[:limit]:
+    skip = Path(exclude).resolve() if exclude else None
+    for path in sorted(root.glob("fault0_run*.csv")):
+        if len(runs) >= limit:
+            break
+        if path.resolve() == skip:
+            continue
         try:
             runs.append(load(Scenario(id=path.stem, label=path.stem, fault=0,
                                       source="dataset", path=str(path))))
@@ -135,7 +142,7 @@ def _fault_free_runs(limit: int = 3) -> List[np.ndarray]:
     return runs
 
 
-def _operating_point(app, repo: Path) -> Tuple[float, str]:
+def _operating_point(app, exclude: Optional[str]) -> Tuple[float, str]:
     pinned = (os.getenv("FINAL_ANOMALY_THRESHOLD") or "").strip()
     if pinned:
         return float(pinned), "FINAL_ANOMALY_THRESHOLD"
@@ -143,7 +150,7 @@ def _operating_point(app, repo: Path) -> Tuple[float, str]:
     stored = float(app.detector.threshold.threshold)
     window, stride = int(app.window_size), int(app.stride)
     scores: List[float] = []
-    for run in _fault_free_runs():
+    for run in _fault_free_runs(exclude):
         for t in range(0, len(run) - window + 1, stride):
             score, _ = app.detector.score_window(run[t:t + window])
             scores.append(float(score))
@@ -164,7 +171,7 @@ def _operating_point(app, repo: Path) -> Tuple[float, str]:
                      f"{false_rate:.0%})")
 
 
-def _build(repo: Path) -> Tuple[Any, float, str, Optional[str]]:
+def _build(repo: Path, exclude: Optional[str]) -> Tuple[Any, float, str, Optional[str]]:
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
     _patch_loader()
@@ -202,7 +209,7 @@ def _build(repo: Path) -> Tuple[Any, float, str, Optional[str]]:
         hybrid_cfg["threshold"] = float(menu_threshold)
     with contextlib.chdir(repo):
         app = TEPApp(config, enable_llm=False)
-        threshold, source = _operating_point(app, repo)
+        threshold, source = _operating_point(app, exclude)
     app.detector.threshold.threshold = float(threshold)
     hybrid_error = None if getattr(app, "hybrid", None) is not None else "hybrid unavailable"
     return app, threshold, source, hybrid_error
@@ -213,11 +220,43 @@ def _build(repo: Path) -> Tuple[Any, float, str, Optional[str]]:
 def _diagnosis_of(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     report = event.get("report") or {}
     verdict = report.get("diagnosis") if isinstance(report, dict) else None
-    return verdict if isinstance(verdict, dict) else None
+    if isinstance(verdict, dict):
+        out = dict(verdict)
+        pred_cls = str(out.get("fault_id") or out.get("predicted_class") or "")
+        if "NORMAL" in pred_cls.upper():
+            out["predicted_fault"] = 0
+            out["predicted_fault_name"] = "Normal operation (no fault)"
+            out["is_normal"] = True
+        else:
+            m = re.search(r"(\d+)", pred_cls)
+            if m:
+                fnum = int(m.group(1))
+                out["predicted_fault"] = fnum
+                out["predicted_fault_name"] = f"Fault {fnum:02d} — {FAULTS.get(fnum, 'Unknown fault')}"
+                out["is_normal"] = False
+            else:
+                out["predicted_fault"] = None
+                out["predicted_fault_name"] = pred_cls
+                out["is_normal"] = False
+        return out
+    rc = report.get("root_cause")
+    if rc:
+        return {
+            "fault_id": "RCA_REPORT",
+            "predicted_class": rc,
+            "predicted_fault_name": rc,
+            "confidence": float(report.get("confidence") or 0.75),
+            "verdict": "classified",
+            "reason": "rca_fallback",
+            "source": "tep_rca_report",
+            "is_normal": False,
+        }
+    return None
 
 
 def _as_event(captured: Any, tick: int, row: np.ndarray,
-              event_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+              event_id: Optional[str] = None, *, confirmed: int, start: int,
+              end: Optional[int]) -> Optional[Dict[str, Any]]:
     for conv in ("model_dump", "dict", "to_dict"):
         if not isinstance(captured, dict) and hasattr(captured, conv):
             captured = getattr(captured, conv)()
@@ -225,15 +264,15 @@ def _as_event(captured: Any, tick: int, row: np.ndarray,
         return None
     ident = event_id or captured.get("event_id") or f"ANOM-{tick}"
     evidence = captured.get("evidence") if isinstance(captured.get("evidence"), dict) else captured
-    return {"event_id": ident, "start_tick": tick, "confirm_tick": tick,
-            "end_tick": captured.get("end_sample") or None,
+    return {"event_id": ident, "start_tick": start, "confirm_tick": confirmed, "report_tick": tick,
+            "end_tick": end,
             "evidence": {**evidence, "event_id": ident},
             "diagnosis": _diagnosis_of(captured),
             "event": captured,
             "values": [round(float(v), 5) for v in row]}
 
 
-def replay(scenario: Scenario, samples: Optional[np.ndarray] = None
+def replay(samples: np.ndarray, *, exclude: Optional[str] = None
            ) -> Dict[str, Any]:
     """Replay one run through the trained pipeline (fresh state per run)."""
     repo = repo_dir()
@@ -241,33 +280,47 @@ def replay(scenario: Scenario, samples: Optional[np.ndarray] = None
         raise FileNotFoundError("no anomaly training checkout found")
 
     with _LOCK:
-        app, threshold, source, hybrid_error = _build(repo)
+        app, threshold, source, hybrid_error = _build(repo, exclude)
         _STATE.update({"threshold": threshold, "source": source,
                        "repo": str(repo), "hybrid": hybrid_error})
 
-    x = load(scenario) if samples is None else np.asarray(samples)
+    x = np.asarray(samples)
     scores: List[float] = []
     flags: List[int] = []
     events: List[Dict[str, Any]] = []
     last = 0.0
+    alarm = False
+    alarm_start = 0
+    confirmed = None
+    event_start = 0
     with contextlib.chdir(repo):
         for t, row in enumerate(x):
             result = app.process_sensor_stream(
-                {"values": [float(v) for v in row], "sample_index": t,
-                 "is_fault": bool(scenario.fault)}) or {}
+                {"values": [float(v) for v in row], "sample_index": t}) or {}
             if result.get("window_score") is not None:
                 last = float(result["window_score"])
+                if result["is_anomalous"] and not alarm:
+                    alarm_start = t
+                alarm = bool(result["is_anomalous"])
+            if result.get("open_event") and confirmed is None:
+                confirmed = t
+                event_start = alarm_start
             scores.append(round(last, 4))
-            flags.append(int(bool(result.get("is_anomalous"))))
+            flags.append(int(alarm))
             if result.get("anomaly_detected") and result.get("event") is not None:
-                built = _as_event(result["event"], t, row, result.get("event_id"))
+                built = _as_event(result["event"], t, row, result.get("event_id"),
+                                  confirmed=confirmed if confirmed is not None else t,
+                                  start=event_start, end=t)
+                confirmed = None
                 if built:
                     events.append(built)
         # A finite replay usually ends while the event is still open; closing it
         # is what produces the report (and therefore the L1 verdict).
         tail = app.finalize_stream() if hasattr(app, "finalize_stream") else None
         if tail:
-            built = _as_event(tail, len(x) - 1, x[-1])
+            built = _as_event(tail, len(x) - 1, x[-1],
+                              confirmed=confirmed if confirmed is not None else len(x) - 1,
+                              start=event_start, end=None)
             if built and built["event_id"] not in {e["event_id"] for e in events}:
                 events.append(built)
 
@@ -281,7 +334,7 @@ def replay(scenario: Scenario, samples: Optional[np.ndarray] = None
                 "threshold": round(threshold, 4),
                 "threshold_source": source,
                 "window": int(app.window_size), "stride": int(app.stride),
-                "confirm": 3, "calibration": source,
+                "confirm": int(getattr(app, "_confirm", 3)), "calibration": source,
                 "diagnosis": "classifier+menu_rule" if not hybrid_error else None,
                 "diagnosis_source": str(getattr(getattr(app, "hybrid", None),
                                                 "artifacts", "") or "") or None,

@@ -194,6 +194,11 @@
   .qa { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
   .qa .q { font-weight: 600; } .qa .a { border-left: 2px solid var(--accent); padding-left: 10px; }
   .incident-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+  .model-diag-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 10px 0; }
+  .model-diag-tag { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; margin-bottom: 4px; }
+  .model-diag-title { font-size: 15.5px; font-weight: 700; color: var(--text); }
+  .model-diag-meta { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 6px; flex-wrap: wrap; }
+  .model-diag-meta b { color: var(--text); font-weight: 600; }
   .hidden { display: none !important; }
 
   /* ---------------- finance ---------------- */
@@ -274,8 +279,9 @@
       <aside class="an-side">
         <div class="card">
           <h3>Simulation</h3>
-          <label class="f" for="scenario">Test-set run</label>
-          <select id="scenario"></select>
+          <label class="f" for="scenario">Input condition</label>
+          <select id="scenario"><option value="mixed">Mixed (blind draw)</option><option value="normal">Normal</option><option value="fault">Fault (any ID)</option></select>
+          <button class="btn" id="drawRun">Draw another run</button>
           <div id="dsInfo" class="note"></div>
           <label class="f">Playback speed</label>
           <div class="seg" id="speed">
@@ -285,9 +291,9 @@
             <button class="btn primary" id="playBtn" style="flex:1">Start</button>
             <button class="btn" id="resetBtn" title="Rewind to the start">↺</button>
           </div>
-          <label class="check"><input type="checkbox" id="autoDiag" checked> Diagnose automatically on alarm</label>
-          <label class="check"><input type="checkbox" id="pauseOnEvent" checked> Pause when an event is confirmed</label>
-          <label class="check"><input type="checkbox" id="showTruth"> Show dataset fault label</label>
+          <label class="check"><input type="checkbox" id="autoDiag" checked> Diagnose automatically when event evidence is ready</label>
+          <label class="check"><input type="checkbox" id="pauseOnEvent" checked> Pause at alarm onset and event confirmation</label>
+          <label class="check"><input type="checkbox" id="showTruth" checked> Show dataset fault label</label>
           <div id="truthLine" class="note hidden"></div>
         </div>
         <div class="card" style="margin-top:16px">
@@ -296,7 +302,7 @@
         </div>
         <div class="card" style="margin-top:16px">
           <h3>How it works</h3>
-          <div class="note" style="margin-top:0">The run is replayed sample by sample (3 min of plant time each). The detector scores every sample against a fault-free baseline; after several consecutive alarms an event is confirmed and its structured evidence is routed through Laya to the <b>TEP anomaly adapter</b>, which writes the root-cause report. The model only ever sees the evidence, never the raw series.</div>
+          <div class="note" style="margin-top:0">The run is replayed sample by sample (3 min of plant time each). The trained detector scores overlapping sensor windows. Consecutive alarms confirm an event. When the event closes, the classifier evaluates its evidence and the adapter can write a root-cause report. The selected fault ID only chooses the input run.</div>
         </div>
       </aside>
 
@@ -340,6 +346,7 @@
             <span class="spacer"></span>
             <button class="btn" id="diagBtn">Diagnose with adapter</button>
           </div>
+          <div id="incClassification" class="hidden"></div>
           <div class="twocol">
             <div>
               <div class="lbl note" style="margin:0 0 6px">Evidence handed to the adapter</div>
@@ -680,40 +687,63 @@ async function anomalyInit() {
   if (A.inited) return; A.inited = true;
   try {
     const d = await (await fetch('/anomaly/scenarios')).json();
-    const sel = $('scenario'); sel.innerHTML = '';
-    for (const s of d.scenarios) {
-      const o = document.createElement('option'); o.value = s.id; o.textContent = s.label; o.dataset.fault = s.fault; sel.appendChild(o);
-    }
+    const sel = $('scenario');
     $('dsInfo').innerHTML = d.synthetic
       ? '<div class="warnbox">No TEP test set found, so these are <b>synthetic</b> demo runs. Set <code>FINAL_TEP_TEST_DIR</code> (or put files in <code>data/tep_test/</code>) to replay the real test set.</div>'
-      : `Dataset: <code>${esc(d.dataset_dir)}</code> · ${d.scenarios.length} runs`;
-    sel.onchange = () => loadScenario(sel.value);
-    if (d.scenarios.length) {
-      const firstFault = d.scenarios.find(s => s.fault) || d.scenarios[0];
-      sel.value = firstFault.id; loadScenario(firstFault.id);
+      : `Dataset: <code>${esc(d.dataset_dir)}</code> · ${d.scenarios.length} runs (Normals &amp; Faults)`;
+    const group = document.createElement('optgroup');
+    group.label = 'Test a specific fault ID';
+    const byFault = new Map();
+    for (const run of d.scenarios) {
+      if (!(run.fault > 0)) continue;
+      if (!byFault.has(run.fault)) byFault.set(run.fault, []);
+      byFault.get(run.fault).push(run);
     }
+    for (const id of [...byFault.keys()].sort((a, b) => a - b)) {
+      group.appendChild(new Option(`IDV(${id}) — ${byFault.get(id)[0].fault_name}`, `idv-${id}`));
+    }
+    if (group.children.length) sel.appendChild(group);
+    function draw() {
+      if (!sel.value.startsWith('idv-')) return loadScenario({ condition: sel.value });
+      const runs = byFault.get(Number(sel.value.slice(4)));
+      const recorded = runs.filter(run => run.source === 'dataset');
+      const pool = recorded.length ? recorded : runs;
+      return loadScenario({ scenario_id: pool[Math.floor(Math.random() * pool.length)].id });
+    }
+    sel.onchange = draw;
+    $('drawRun').onclick = draw;
+    await draw();
   } catch (e) { $('dsInfo').innerHTML = '<div class="warnbox">Could not load scenarios — is the server running?</div>'; }
 }
 
-async function loadScenario(id) {
+async function loadScenario(selection) {
+  $('scenario').disabled = $('drawRun').disabled = true;
+  $('truthLine').classList.add('hidden');
+  $('truthCmp').innerHTML = '';
   pause(); A.tl = null; A.tick = -1; A.event = null; A.diagnosed.clear();
   $('incident').classList.add('hidden'); $('diagnosis').classList.add('hidden');
   if (A.diagCtl) A.diagCtl.abort();
   $('kStatus').textContent = 'Loading…'; $('kStatus').className = 'v';
   $('playBtn').disabled = true;
   try {
-    const r = await fetch('/anomaly/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenario_id: id }) });
+    const r = await fetch('/anomaly/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selection) });
     if (!r.ok) throw new Error((await r.json()).detail || r.status);
     A.tl = await r.json();
   } catch (e) { $('kStatus').textContent = 'Error'; $('detInfo').textContent = String(e.message || e); return; }
+  finally { $('scenario').disabled = $('drawRun').disabled = false; }
   const t = A.tl, det = t.detector;
   $('detInfo').innerHTML = `<b>${esc(det.name)}</b> (${esc(det.backend)})<br>Threshold ${fmt(det.threshold)} · confirm after ${det.confirm} alarms<br>Calibration: ${esc(det.calibration)}` +
+    (det.stride ? `<br>Window: ${det.window} samples · scored every ${det.stride * t.sample_minutes} min · classified at event closure` : '') +
     (t.notices ? '<div class="warnbox">' + t.notices.map(esc).join('<br>') + '</div>' : '');
   $('kThr').textContent = fmt(det.threshold);
   const sc = t.scenario;
-  $('truthLine').innerHTML = sc.fault == null ? 'Unlabelled run' : `Label: <b>IDV(${sc.fault})</b> — ${esc(sc.fault_name)}` + (t.fault_onset != null ? ` · introduced at ${clock(t.fault_onset)}` : '');
+  const isNorm = (sc.fault == null || sc.fault === 0);
+  $('truthLine').innerHTML = isNorm
+    ? 'Dataset ground truth: <b>Normal operation (fault-free)</b>'
+    : `Dataset ground truth: <b>IDV(${sc.fault})</b> — ${esc(sc.fault_name)}` + (t.fault_onset != null ? ` · introduced at ${clock(t.fault_onset)}` : '');
+  $('truthLine').classList.toggle('hidden', !$('showTruth').checked);
   buildHeat();
-  A.selected = t.events.length ? t.events[0].evidence.top_anomalous_sensors[0].name : 'XMEAS_7';
+  A.selected = t.events[0]?.evidence?.top_anomalous_sensors?.[0]?.name || 'XMEAS_7';
   A.tick = 0; $('playBtn').disabled = false; $('playBtn').textContent = 'Start';
   updateKpis(); drawAll(); renderBars();
 }
@@ -745,7 +775,12 @@ function step(now) {
   for (let k = 0; k < adv && A.tick < A.tl.n - 1; k++) {
     A.tick++;
     const ev = A.tl.events.find(e => e.confirm_tick === A.tick);
-    if (ev) { onEvent(ev); if ($('pauseOnEvent').checked) { updateKpis(); drawAll(); renderBars(); pause(); return; } }
+    const report = A.tl.events.find(e => (e.report_tick ?? e.confirm_tick) === A.tick);
+    if (report) onEvent(report);
+    const firstAlarm = A.tl.anomalous[A.tick] && !A.tl.anomalous[A.tick - 1];
+    if ($('pauseOnEvent').checked && (firstAlarm || ev)) {
+      pause(); updateKpis(); drawAll(); renderBars(); return;
+    }
   }
   updateKpis(); drawAll(); renderBars();
   if (A.tick >= A.tl.n - 1) { pause(); return; }
@@ -755,8 +790,9 @@ function step(now) {
 function statusAt(t) {
   const tl = A.tl; if (!tl || t < 0) return ['Idle', ''];
   const ev = tl.events.find(e => e.confirm_tick <= t && (e.end_tick == null || e.end_tick > t));
-  if (ev) return ['Event', 'status-event'];
+  if (ev) return ['Confirmed anomaly', 'status-event'];
   if (tl.anomalous[t]) return ['Alarm', 'status-alarm'];
+  if (t === tl.n - 1 && !tl.events.length) return ['No confirmed fault', 'status-normal'];
   return ['Normal', 'status-normal'];
 }
 function updateKpis() {
@@ -897,6 +933,37 @@ function onEvent(ev) {
   $('incId').textContent = e.event_id + ' · ' + clock(ev.confirm_tick);
   $('incSev').textContent = e.severity; $('incSev').className = 'sev ' + e.severity;
   $('incSub').textContent = 'Candidate: ' + String(e.candidate_subsystem || '?').replace(/_/g, ' ');
+
+  // Render Model Anomaly Classification banner
+  const diag = ev.diagnosis;
+  const classEl = $('incClassification');
+  if (classEl) {
+    if (diag && (diag.predicted_fault_name || diag.predicted_class)) {
+      const isNorm = diag.is_normal || diag.verdict === 'no_fault';
+      const title = esc(diag.predicted_fault_name || diag.predicted_class);
+      const conf = Math.round((diag.confidence || 0) * 100);
+      const src = esc(diag.source || 'L1 Classifier');
+      const badge = isNorm ? 'NORMAL PROCESS (NO FAULT)' : diag.abstained ? 'UNCLASSIFIED EVENT' : 'MODEL CLASSIFIED ANOMALY';
+      const badgeCol = isNorm ? 'var(--ok)' : 'var(--warn)';
+      classEl.innerHTML = `
+        <div class="model-diag-box" style="border-left: 4px solid ${badgeCol};">
+          <div class="model-diag-tag" style="color: ${badgeCol};">${badge}</div>
+          <div class="model-diag-title">${title}</div>
+          <div class="model-diag-meta">
+            <span>Confidence: <b>${conf}%</b></span>
+            <span>Verdict: <b>${esc(diag.verdict || 'classified')}</b></span>
+            <span>Subsystem: <b>${esc(e.candidate_subsystem || '').replace(/_/g, ' ')}</b></span>
+            <span>Classifier: <b>${src}</b></span>
+          </div>
+        </div>
+      `;
+      classEl.classList.remove('hidden');
+    } else {
+      classEl.innerHTML = '';
+      classEl.classList.add('hidden');
+    }
+  }
+
   $('evTable').innerHTML = '<tr><th>Sensor</th><th>Observed</th><th>Baseline</th><th>Dev %</th><th>z</th><th>Trend</th></tr>' +
     (e.top_anomalous_sensors || []).map(s => `<tr data-tag="${esc(s.name)}" style="cursor:pointer"><td title="${esc(s.name)}">${esc(s.display_name || s.name)}</td><td class="num">${fmt(s.current_value)}</td><td class="num">${fmt(s.baseline_value)}</td><td class="num">${s.deviation_percent > 0 ? '+' : ''}${fmt(s.deviation_percent)}</td><td class="num">${fmt(s.z_score)}</td><td>${esc(s.trend || '')}</td></tr>`).join('');
   $('evTable').querySelectorAll('tr[data-tag]').forEach(r => r.onclick = () => { A.selected = r.dataset.tag; drawAll(); });
@@ -949,7 +1016,11 @@ async function diagnose() {
   $('diagBtn').disabled = true; pollStatus(true);
   let text = '';
   try {
-    await sse('/anomaly/reason', { evidence: ev.evidence, values: ev.values }, e => {
+    const reasonPayload = {
+      evidence: Object.assign({}, ev.evidence, { diagnosis: ev.diagnosis }),
+      values: ev.values
+    };
+    await sse('/anomaly/reason', reasonPayload, e => {
       if (e.event === 'route') { $('diagRoute').textContent = `→ ${TASK_LABEL[e.task] || e.task}`; $('diagStatus').textContent = `Loading ${TASK_LABEL[e.task] || e.task}…`; }
       else if (e.event === 'adapter') { $('diagRoute').textContent = `→ ${TASK_LABEL[e.task]} · ${e.cold ? 'loaded' + (e.swap_ms ? ' in ' + (e.swap_ms / 1000).toFixed(1) + 's' : '') : 'already loaded'}${e.unloaded && e.unloaded.length ? ' · swapped out ' + e.unloaded.join(', ') : ''}`; $('diagStatus').textContent = 'Writing root-cause report…'; refreshStatus(); }
       else if (e.event === 'token' || e.event === 'thinking') { text += e.text; $('raw').textContent = text; }
@@ -961,7 +1032,14 @@ async function diagnose() {
     else if (!$('diagStatus').querySelector('.notice')) $('diagStatus').textContent = 'No output.';
     const sc = A.tl.scenario;
     if (sc.fault != null) {
-      $('truthCmp').innerHTML = `Dataset label: <b>IDV(${sc.fault})</b> — ${esc(sc.fault_name)}${sc.source === 'synthetic' ? ' <span class="note">(synthetic run)</span>' : ''}`;
+      let truthText = `Dataset ground truth: <b>IDV(${sc.fault})</b> — ${esc(sc.fault_name)}${sc.source === 'synthetic' ? ' <span class="note">(synthetic run)</span>' : ''}`;
+      if (ev.diagnosis && ev.diagnosis.predicted_fault != null) {
+        const isMatch = (ev.diagnosis.predicted_fault === sc.fault);
+        truthText += isMatch
+          ? ' · <span style="color:var(--ok);font-weight:600">✓ Model Classification Matched Ground Truth</span>'
+          : ` · <span style="color:var(--warn);font-weight:600">Model classified: Fault ${ev.diagnosis.predicted_fault}</span>`;
+      }
+      $('truthCmp').innerHTML = truthText;
       $('truthCmp').classList.toggle('hidden', !$('showTruth').checked);
     }
   } catch (err) {
@@ -978,7 +1056,7 @@ async function askIncident(q) {
   const a = wrap.querySelector('.a'); let text = '';
   $('qSend').disabled = true; pollStatus(true);
   try {
-    await sse('/anomaly/reason', { evidence: ev.evidence, values: ev.values, question: q, history: A.qaHistory.slice(-6) }, e => {
+    await sse('/anomaly/reason', { evidence: { ...ev.evidence, diagnosis: ev.diagnosis }, values: ev.values, question: q, history: A.qaHistory.slice(-6) }, e => {
       if (e.event === 'token') { text += e.text; a.classList.remove('typing'); a.innerHTML = md(text); }
       else if (e.event === 'notice') { a.classList.remove('typing'); a.innerHTML = `<p class="notice">${esc(e.text)}</p>`; }
     });

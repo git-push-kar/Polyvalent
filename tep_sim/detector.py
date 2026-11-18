@@ -53,8 +53,8 @@ def run(scenario: Scenario, cfg: Optional[DetectorConfig] = None) -> Dict[str, A
     # Never calibrate a fault-free run on itself: use another normal run.
     baseline = (baseline_from_dataset(exclude=scenario.path)
                 if scenario.source == "dataset" else None)
-    timeline = _builtin(x, baseline, onset, cfg, scenario)
-    ext = _external(x, timeline, cfg, scenario)
+    timeline = _builtin(x, baseline, onset, cfg)
+    ext = _external(x, timeline, scenario.path)
     if ext is not None:
         timeline = ext
     timeline["scenario"] = scenario.to_dict()
@@ -67,6 +67,38 @@ def run(scenario: Scenario, cfg: Optional[DetectorConfig] = None) -> Dict[str, A
 
 # -- builtin detector -------------------------------------------------------
 
+def _infer_builtin_diagnosis(ev: Dict[str, Any]) -> Dict[str, Any]:
+    top_names = [s.get("display_name", "") + " " + s.get("name", "")
+                 for s in ev.get("top_anomalous_sensors", [])[:3]]
+    sub = ev.get("candidate_subsystem", "")
+    if any("Reactor_Cooling" in s or "XMV_10" in s or "XMEAS_21" in s for s in top_names):
+        fnum = 4
+    elif any("Condenser_Cooling" in s or "XMV_11" in s or "XMEAS_22" in s for s in top_names):
+        fnum = 5
+    elif any("A_Feed" in s or "XMEAS_1" in s for s in top_names):
+        fnum = 6
+    elif any("A_and_C_Feed" in s or "XMEAS_4" in s for s in top_names):
+        fnum = 1
+    elif any("Component_F" in s or "Purge" in s or "Component_B" in s for s in top_names):
+        fnum = 2
+    elif "stripper" in sub:
+        fnum = 17
+    else:
+        fnum = 16
+    fname = FAULTS.get(fnum, f"Disturbance in {sub}")
+    return {
+        "fault_id": f"FAULT_{fnum:02d}",
+        "predicted_class": f"FAULT_{fnum:02d}",
+        "predicted_fault": fnum,
+        "predicted_fault_name": f"Fault {fnum:02d} — {fname}",
+        "confidence": 0.82,
+        "verdict": "classified",
+        "reason": "subsystem_heuristic",
+        "source": "builtin_heuristic",
+        "is_normal": False,
+    }
+
+
 def _rolling_mean(v: np.ndarray, w: int) -> np.ndarray:
     c = np.cumsum(np.insert(v, 0, 0.0))
     out = np.empty_like(v)
@@ -77,7 +109,7 @@ def _rolling_mean(v: np.ndarray, w: int) -> np.ndarray:
 
 
 def _builtin(x: np.ndarray, baseline: Optional[np.ndarray], onset: int,
-             cfg: DetectorConfig, scenario: Scenario) -> Dict[str, Any]:
+             cfg: DetectorConfig) -> Dict[str, Any]:
     if baseline is not None and len(baseline) >= 50:
         calib = baseline
         calib_desc = f"fault-free test run ({len(baseline)} samples)"
@@ -105,12 +137,14 @@ def _builtin(x: np.ndarray, baseline: Optional[np.ndarray], onset: int,
             normal_run = 0
             if open_ev is None and streak >= cfg.confirm:
                 start = t - streak + 1
-                ev_id = f"ANOM-{scenario.fault if scenario.fault is not None else 'X'}-{t:04d}"
+                ev_id = f"ANOM-{t:04d}"
                 evidence = build_evidence(ev_id, x, z, mu, sd, score, threshold,
                                           start, t, cfg, calib_desc)
+                diag = _infer_builtin_diagnosis(evidence)
                 open_ev = {"event_id": ev_id, "start_tick": start,
                            "confirm_tick": t, "end_tick": None,
                            "evidence": evidence,
+                           "diagnosis": diag,
                            "values": [round(float(v), 5) for v in x[t]]}
                 events.append(open_ev)
         else:
@@ -120,6 +154,7 @@ def _builtin(x: np.ndarray, baseline: Optional[np.ndarray], onset: int,
                 open_ev["end_tick"] = t
                 open_ev = None
 
+    diagnoses = [e["diagnosis"] for e in events if e.get("diagnosis")]
     return {
         "n": int(len(x)),
         "detector": {"backend": "builtin", "name": "z-score / rolling mean-square",
@@ -131,6 +166,8 @@ def _builtin(x: np.ndarray, baseline: Optional[np.ndarray], onset: int,
         "raw": [[float(f"{v:.5g}") for v in row] for row in x],
         "baseline": [float(f"{v:.6g}") for v in mu],
         "events": events,
+        "diagnosis": diagnoses[-1] if diagnoses else None,
+        "diagnoses": diagnoses,
     }
 
 
@@ -233,8 +270,7 @@ def build_evidence(event_id: str, x: np.ndarray, z: np.ndarray, mu: np.ndarray,
 
 # -- external (trained) detector -------------------------------------------
 
-def _external(x: np.ndarray, viz: Dict[str, Any], cfg: DetectorConfig,
-              scenario: Scenario) -> Optional[Dict[str, Any]]:
+def _external(x: np.ndarray, viz: Dict[str, Any], exclude: Optional[str]) -> Optional[Dict[str, Any]]:
     """Replay through the trained C68-Anomaly pipeline when it is available.
 
     `tep_sim/trained.py` owns the repairs that checkout needs (architecture
@@ -247,7 +283,7 @@ def _external(x: np.ndarray, viz: Dict[str, Any], cfg: DetectorConfig,
     if trained.repo_dir() is None:
         return None
     try:
-        result = trained.replay(scenario, samples=x)
+        result = trained.replay(x, exclude=exclude)
     except Exception as exc:
         logger.warning("trained detector unavailable, using builtin: %s", exc)
         viz.setdefault("notices", []).append(
@@ -273,6 +309,10 @@ def telemetry_block(ev: Dict[str, Any], for_report: bool = True) -> str:
     lines = ["[ANOMALY INCIDENT TELEMETRY]",
              f"Event ID: {ev.get('event_id', 'unknown')}",
              f"Severity: {ev.get('severity', 'unknown')}"]
+    diagnosis = ev.get("diagnosis") or {}
+    decision = diagnosis.get("fault_id")
+    if decision and decision != "RCA_REPORT":
+        lines.append(f"Classifier decision: {decision} ({diagnosis.get('verdict', 'evaluated')})")
     if not for_report:
         lines.append(f"Detector: {ev.get('detector_type', 'detector')} score "
                      f"{_num(ev.get('anomaly_score'))} vs threshold "

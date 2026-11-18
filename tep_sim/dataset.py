@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import re
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -46,7 +47,19 @@ class Scenario:
     run: Optional[int] = None
 
     def to_dict(self) -> Dict[str, object]:
-        return {"id": self.id, "label": self.label, "fault": self.fault,
+        is_normal = (self.fault or 0) == 0
+        category = "normal" if is_normal else "fault"
+        if self.source == "synthetic":
+            b_label = ("[SYNTHETIC] Normal Baseline (Fault-Free)" if is_normal
+                       else f"[SYNTHETIC] Fault Scenario {self.fault:02d}")
+        else:
+            b_label = (f"Normal Operation — Run {self.run or 1} (Fault-Free)" if is_normal
+                       else f"Fault Scenario {self.fault:02d} — Run {self.run or 1}")
+        return {"id": self.id,
+                "label": self.label,
+                "blind_label": b_label,
+                "category": category,
+                "fault": self.fault,
                 "fault_name": FAULTS.get(self.fault, "unknown")
                 if self.fault is not None else "unlabelled",
                 "source": self.source,
@@ -114,16 +127,31 @@ def discover() -> List[Scenario]:
                 label += f" (run {run})"
             out.append(Scenario(id=_sid(p), label=label, fault=fault,
                                 source="dataset", path=str(p), run=run))
-        out.sort(key=lambda s: (s.fault if s.fault is not None else 99,
-                                s.run or 0, s.label))
     # Synthetic runs stay listed next to a real test set: they are the
     # "inject a fault" option, the dataset runs are the real ones. Their ids
     # are synthetic-*, so they never collide with the ds-* dataset ids.
     out += [Scenario(id=f"synthetic-{k}", label=f"[SYNTHETIC] {v}",
                      fault=k, source="synthetic")
-            for k, v in ((4, FAULTS[4]), (6, FAULTS[6]), (5, FAULTS[5]),
-                         (0, FAULTS[0]))]
+            for k, v in ((0, FAULTS[0]), (4, FAULTS[4]), (6, FAULTS[6]),
+                         (5, FAULTS[5]))]
+    # Normals first (fault 0), then faults 1..20
+    out.sort(key=lambda s: (0 if (s.fault or 0) == 0 else 1,
+                            s.fault if s.fault is not None else 99,
+                            s.run or 0, s.label))
     return out
+
+
+def draw_run(condition: str) -> Scenario:
+    """Draw a run by input condition, preferring recorded data when available."""
+    runs = discover()
+    pools = {}
+    for key in ("normal", "fault"):
+        matches = [s for s in runs if s.fault is not None
+                   and ((s.fault == 0) == (key == "normal"))]
+        pools[key] = [s for s in matches if s.source == "dataset"] or matches
+    if condition == "mixed":
+        condition = random.choice([key for key, items in pools.items() if items])
+    return random.choice(pools[condition])
 
 
 def find(scenario_id: str) -> Scenario:
