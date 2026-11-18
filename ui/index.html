@@ -809,7 +809,7 @@ async function openChat(id) {
         const src = upload && '/chat/history/' + encodeURIComponent(id) + '/images/' + encodeURIComponent(upload.id);
         userMsg(turn.content, src);
       } else {
-        const ui = assistantMsg();
+        const ui = assistantMsg(false);
         ui.ans.classList.remove('typing');
         const analysis = saved.analyses?.[turn.analysis_id];
         ui.chatId = id; ui.imageId = turn.image_id;
@@ -880,17 +880,58 @@ function userMsg(text, imgUrl) {
   const b = document.createElement('div'); b.className = 'bubble'; b.textContent = text; m.appendChild(b);
   thread.appendChild(m);
 }
+const thinkingWords = [
+  'Pondering', 'Connecting', 'Untangling', 'Reflecting', 'Wondering', 'Musing',
+  'Dreaming', 'Imagining', 'Sketching', 'Doodling', 'Tinkering', 'Noodling',
+  'Puzzling', 'Exploring', 'Wandering', 'Meandering', 'Roaming', 'Delving',
+  'Rummaging', 'Sifting', 'Sorting', 'Tracing', 'Mapping', 'Charting',
+  'Weaving', 'Stitching', 'Knitting', 'Braiding', 'Threading', 'Spinning',
+  'Brewing', 'Steeping', 'Simmering', 'Percolating', 'Bubbling', 'Whisking',
+  'Mixing', 'Blending', 'Folding', 'Kneading', 'Shaping', 'Sculpting',
+  'Crafting', 'Whittling', 'Carving', 'Polishing', 'Buffing', 'Honing',
+  'Tuning', 'Humming', 'Composing', 'Arranging', 'Orchestrating', 'Harmonizing',
+  'Gathering', 'Assembling', 'Balancing', 'Considering', 'Contemplating', 'Unfurling'
+];
+let wordBag = [], lastWord = '';
+function nextThinkingWord() {
+  if (!wordBag.length) {
+    wordBag = [...thinkingWords];
+    for (let i = wordBag.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [wordBag[i], wordBag[j]] = [wordBag[j], wordBag[i]];
+    }
+    const end = wordBag.length - 1;
+    if (wordBag[end] === lastWord) [wordBag[0], wordBag[end]] = [wordBag[end], wordBag[0]];
+  }
+  lastWord = wordBag.pop();
+  return lastWord;
+}
+
+customElements.define('thinking-word', class extends HTMLElement {
+  connectedCallback() {
+    const motion = matchMedia('(prefers-reduced-motion: reduce)');
+    const advance = () => { this.textContent = nextThinkingWord() + '…'; };
+    const sync = () => {
+      clearInterval(this.timer);
+      if (!motion.matches) this.timer = setInterval(advance, 2200);
+    };
+    advance();
+    sync();
+    motion.addEventListener('change', sync);
+    this.cleanup = () => { clearInterval(this.timer); motion.removeEventListener('change', sync); };
+  }
+  disconnectedCallback() { this.cleanup(); }
+});
+
 function waitingIndicator() {
   return '<span class="thought-pulse" role="status" aria-label="Preparing a response">' +
-    '<i class="thought-sprite" aria-hidden="true"></i><span class="thought-words" aria-hidden="true">' +
-    ['Pondering', 'Connecting', 'Untangling', 'Reflecting'].map(word => '<span>' + word + '…</span>').join('') +
-    '</span></span>';
+    '<i class="thought-sprite" aria-hidden="true"></i><thinking-word aria-hidden="true"></thinking-word></span>';
 }
-function assistantMsg() {
+function assistantMsg(waiting = true) {
   const m = document.createElement('div'); m.className = 'msg assistant';
   const route = document.createElement('div'); route.className = 'route';
   const bubble = document.createElement('div'); bubble.className = 'bubble';
-  const ans = document.createElement('div'); ans.className = 'md typing'; ans.innerHTML = waitingIndicator();
+  const ans = document.createElement('div'); ans.className = 'md typing'; if (waiting) ans.innerHTML = waitingIndicator();
   bubble.appendChild(ans); m.append(route, bubble); thread.appendChild(m);
   return { m, route, bubble, ans, text: '', think: null, thinkBody: null, thinkSum: null, raf: 0 };
 }

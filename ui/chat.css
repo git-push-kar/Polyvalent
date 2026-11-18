@@ -137,12 +137,9 @@ body:has(#view-finance.active) {--accent:#48588b;--accent-soft:#e7eaf5}
 .thought-sprite {display:block;width:18px;height:16px;background:var(--accent);border-radius:55% 55% 38% 40%;position:relative;animation:sprite-hop 1.8s ease-in-out infinite}
 .thought-sprite::before {content:"";position:absolute;width:3px;height:3px;border-radius:50%;background:var(--panel);left:4px;top:7px;box-shadow:7px 0 var(--panel)}
 .thought-sprite::after {content:"";position:absolute;width:6px;height:6px;background:inherit;top:-3px;left:9px;transform:rotate(28deg);border-radius:0 90% 0 90%}
-.thought-words {display:grid}
-.thought-words span {grid-area:1/1;opacity:0;animation:thought-word 8s linear infinite}
-.thought-words span:nth-child(2) {animation-delay:2s}.thought-words span:nth-child(3) {animation-delay:4s}.thought-words span:nth-child(4) {animation-delay:6s}
-@keyframes thought-word {0%,22%{opacity:1}25%,100%{opacity:0}}
+thinking-word {min-width:13ch}
 @keyframes sprite-hop {0%,52%,100%{transform:translateY(0) rotate(-7deg)}27%{transform:translateY(-5px) rotate(12deg)}65%{transform:scale(1.09,.92)}}
-@media(prefers-reduced-motion:reduce){.thought-sprite,.thought-words span {animation:none}.thought-words span:first-child {opacity:1}.copy-answer {transition:none}}
+@media(prefers-reduced-motion:reduce){.thought-sprite {animation:none}.copy-answer {transition:none}}
 @media(max-width:850px){
   .an-layout,.fin-layout {display:flex;flex-direction:column;min-height:0;overflow:auto}
   .an-side,.fin-side,.an-main,.fin-main {flex:none;overflow:visible}
