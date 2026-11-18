@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Polyvalent</title>
+<title>PolyVL</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%234f46e5%22/%3E%3Ctext x=%2216%22 y=%2222%22 font-size=%2216%22 text-anchor=%22middle%22 fill=%22white%22 font-family=%22Arial%22 font-weight=%22700%22%3EP%3C/text%3E%3C/svg%3E">
 <style>
   :root {
@@ -347,18 +347,19 @@
     .bar { grid-template-columns: 110px 1fr 40px; }
   }
 </style>
-<link rel="stylesheet" href="/ui/chat.css">
 <link rel="stylesheet" href="/ui/finance.css">
+<link rel="stylesheet" href="/ui/chat.css">
 </head>
 <body>
 <header class="top">
-  <div class="brand"><div class="logo">P</div>Polyvalent</div>
+  <div class="brand"><div class="logo">P</div>PolyVL</div>
   <nav class="tabs" role="tablist" aria-label="Workspaces">
     <button role="tab" id="tab-chat" aria-controls="view-chat" data-view="chat">Chat</button>
     <button role="tab" id="tab-anomaly" aria-controls="view-anomaly" data-view="anomaly"><span class="lg">Anomaly detection</span><span class="sm">Anomaly</span></button>
-    <button role="tab" id="tab-finance" aria-controls="view-finance" data-view="finance"><span class="lg">Finance portfolio</span><span class="sm">Finance</span></button>
+    <button role="tab" id="tab-finance" aria-controls="view-finance" data-view="finance"><span class="lg">Finance RL</span><span class="sm">Finance</span></button>
   </nav>
   <div class="spacer"></div>
+      <div class="theme-controls" aria-label="Color theme"><button id="themeLight">☀ &nbsp;Light</button><button id="themeDark">☾ &nbsp;Dark</button></div>
   <span class="pill badge-stub" id="stubBadge" title="FINAL_STUB_GENERATION=1: placeholder text, no model weights">Demo mode</span>
   <span class="pill" id="residentPill" title="Weights currently resident on the device"><span class="dot" id="residentDot"></span><span id="residentText">No adapter loaded</span></span>
 </header>
@@ -370,7 +371,7 @@
       <button id="newChat" class="start-chat"><span aria-hidden="true">＋</span> New conversation</button>
       <label class="chat-search"><span aria-hidden="true">⌕</span><input id="chatSearch" type="search" aria-label="Search conversations" placeholder="Search chats"></label>
       <h2>Conversations</h2><div id="chatList"></div><small id="historyStatus" role="status"></small>
-      <div class="theme-controls" aria-label="Chat theme"><button id="themeLight">☀ &nbsp;Light</button><button id="themeDark">☾ &nbsp;Dark</button></div>
+
     </aside>
     <div class="chat-main"><div class="chat-bar"><button id="railToggle" aria-controls="chatRail" aria-expanded="false" aria-label="Toggle conversations">☰</button><span id="chatTitle">New conversation</span></div>
     <div id="log" aria-live="polite"><div class="thread" id="thread"><div class="empty" id="empty">
@@ -387,7 +388,7 @@
           <button class="icon-btn" id="attachBtn" title="Attach a face image (routes to deepfake analysis)" aria-label="Attach image"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 11.6 12 20.1a5 5 0 0 1-7.1-7.1l8.6-8.6a3.4 3.4 0 1 1 4.8 4.8l-8.3 8.3a1.8 1.8 0 0 1-2.6-2.6l7.6-7.5"/></svg></button>
           <input type="file" id="img" accept="image/*" hidden>
 
-          <textarea id="box" rows="1" placeholder="Message Polyvalent…"></textarea>
+          <textarea id="box" rows="1" placeholder="Message PolyVL…"></textarea>
           <label class="switch" id="deepThinkWrap" title="Deep thinking — pin this message to the reasoning adapter">
             <input type="checkbox" id="deepThink">
             <span class="track"><span class="knob"></span></span>
@@ -411,7 +412,7 @@
           <label class="f" for="scenario">Input condition</label>
           <select id="scenario"><option value="mixed">Mixed (blind draw)</option><option value="normal">Normal</option><option value="fault">Fault (any ID)</option></select>
           <button class="btn" id="drawRun">Draw another run</button>
-          <div id="dsInfo" class="note"></div>
+
           <label class="f">Playback speed</label>
           <div class="seg" id="speed">
             <button data-s="4">1×</button><button data-s="12" class="on">3×</button><button data-s="40">10×</button><button data-s="0">Max</button>
@@ -420,22 +421,17 @@
             <button class="btn primary" id="playBtn" style="flex:1">Start</button>
             <button class="btn" id="resetBtn" title="Rewind to the start">↺</button>
           </div>
-          <label class="check"><input type="checkbox" id="autoDiag" checked> Diagnose automatically when event evidence is ready</label>
+          <details class="work-disclosure"><summary>Playback options</summary><label class="check"><input type="checkbox" id="autoDiag" checked> Diagnose automatically when event evidence is ready</label>
           <label class="check"><input type="checkbox" id="pauseOnEvent" checked> Pause at alarm onset and event confirmation</label>
-          <label class="check"><input type="checkbox" id="showTruth" checked> Show dataset fault label</label>
+          <label class="check"><input type="checkbox" id="showTruth" checked> Show dataset fault label</label></details>
           <div id="truthLine" class="note hidden"></div>
         </div>
-        <div class="card" style="margin-top:16px">
-          <h3>Detector</h3>
-          <div id="detInfo" class="note" style="margin-top:0">—</div>
-        </div>
-        <div class="card" style="margin-top:16px">
-          <h3>How it works</h3>
-          <div class="note" style="margin-top:0">The run is replayed sample by sample (3 min of plant time each). The trained detector scores overlapping sensor windows. Consecutive alarms confirm an event. When the event closes, the classifier evaluates its evidence and the adapter can write a root-cause report. The selected fault ID only chooses the input run.</div>
-        </div>
+        <details class="card work-disclosure"><summary>Detector &amp; dataset</summary>
+          <div id="detInfo" class="note"></div><div id="dsInfo" class="note"></div>
+        </details>
       </aside>
 
-      <div class="an-main">
+      <div class="an-main"><div class="workspace-title"><h2>Process monitor</h2><span>Tennessee Eastman</span></div>
         <div class="kpis">
           <div class="kpi"><div class="k">Plant time</div><div class="v" id="kTime">00:00</div></div>
           <div class="kpi"><div class="k">Detector score</div><div class="v" id="kScore">—</div></div>
@@ -449,24 +445,6 @@
           <div class="legend"><span><i style="background:var(--accent)"></i>score</span><span><i style="background:var(--bad)"></i>threshold</span><span><i style="background:var(--muted)"></i>fault introduced (label)</span><span><i style="background:var(--warn)"></i>alarm samples</span></div>
         </div>
 
-        <div class="twocol">
-          <div class="card">
-            <h3>Sensor deviation map <span class="sub">|z| per sensor over time — click a row</span></h3>
-            <canvas id="heatCanvas" height="240" aria-label="Sensor deviation heatmap"></canvas>
-            <div class="legend"><span><i style="background:var(--panel-2)"></i>|z| &lt; 3</span><span><i style="background:#f59e0b"></i>3–6</span><span><i style="background:#dc2626"></i>&gt; 6</span></div>
-          </div>
-          <div class="card">
-            <h3>Largest deviations now</h3>
-            <div class="bars" id="bars"><div class="note">Start the simulation.</div></div>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3>Sensor trace <span class="sub" id="traceName">—</span></h3>
-          <canvas id="traceCanvas" height="150" aria-label="Selected sensor trace"></canvas>
-          <div class="legend"><span><i style="background:var(--accent)"></i>observed</span><span><i style="background:var(--muted)"></i>fault-free baseline</span></div>
-        </div>
-
         <div class="card hidden" id="incident">
           <div class="incident-head">
             <h3 style="margin:0">Incident <span id="incId"></span></h3>
@@ -476,7 +454,8 @@
             <button class="btn" id="diagBtn">Diagnose with adapter</button>
           </div>
           <div id="incClassification" class="hidden"></div>
-          <div class="twocol">
+          <div id="evLimits"></div>
+          <details class="work-disclosure"><summary>Incident evidence and onset sequence</summary><div class="note" id="incSource"></div><div class="twocol">
             <div>
               <div class="lbl note" style="margin:0 0 6px">Evidence handed to the adapter</div>
               <div style="overflow-x:auto"><table class="ev" id="evTable"></table></div>
@@ -484,9 +463,8 @@
             <div>
               <div class="lbl note" style="margin:0 0 6px">Onset sequence</div>
               <ul class="timeline" id="evSeq"></ul>
-              <div id="evLimits"></div>
             </div>
-          </div>
+          </div></details>
         </div>
 
         <div class="card hidden" id="diagnosis">
@@ -510,6 +488,26 @@
             <div class="qa" id="qa"></div>
           </div>
         </div>
+        <details class="card work-disclosure" id="sensorDetails"><summary>Explore sensors</summary>
+        <div class="twocol">
+          <div class="card">
+            <h3>Sensor deviation map <span class="sub">|z| per sensor over time — click a row</span></h3>
+            <canvas id="heatCanvas" height="240" aria-label="Sensor deviation heatmap"></canvas>
+            <div class="legend"><span><i style="background:var(--panel-2)"></i>|z| &lt; 3</span><span><i style="background:#f59e0b"></i>3–6</span><span><i style="background:#dc2626"></i>&gt; 6</span></div>
+          </div>
+          <div class="card">
+            <h3>Largest deviations now</h3>
+            <div class="bars" id="bars"><div class="note">Start the simulation.</div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Sensor trace <span class="sub" id="traceName">—</span></h3>
+          <canvas id="traceCanvas" height="150" aria-label="Selected sensor trace"></canvas>
+          <div class="legend"><span><i style="background:var(--accent)"></i>observed</span><span><i style="background:var(--muted)"></i>fault-free baseline</span></div>
+        </div>
+
+        </details>
       </div>
     </div>
   </section>
@@ -519,13 +517,12 @@
 <div class="fin-layout">
   <aside class="fin-side" aria-label="Portfolio controls">
     <div class="card">
-      <h3>Simulation</h3>
-      <div class="note" id="fin-subtitle">Nifty 49 Equities · InternVL3-2B State RL</div>
+      <h3>Trading session</h3>
       <label class="f" for="fin-mode">Simulation mode</label>
       <select id="fin-mode" aria-label="Simulation mode">
-        <option value="benchmark">1. Final Benchmark Replay (Jan 2025 – Jan 2026)</option>
-        <option value="ytd">2. 2026 YTD History Replay (Jan 1, 2026 – Yesterday)</option>
-        <option value="live">3. Live Real-Time Market (Jan 2026 – Today / Tomorrow)</option>
+        <option value="benchmark">Benchmark replay</option>
+        <option value="ytd">2026 year-to-date replay</option>
+        <option value="live">Live market · paper trading</option>
       </select>
       <div id="fin-playback-tools">
         <label class="f" for="fin-speed">Playback speed</label>
@@ -535,40 +532,35 @@
         <button class="btn primary" id="fin-play">▶ Start simulation</button>
         <button class="btn" id="fin-day">Next day</button>
         <button class="btn" id="fin-rebalance">Next rebalance</button>
-        <button class="btn" id="fin-live-refresh" style="display:none;">🔄 Fetch Live Quotes</button>
-        <button class="btn primary" id="fin-live-decide" style="display:none;">🤖 Run Model Decision</button>
-        <button class="btn" id="fin-live-settle" style="display:none;background:#2e7d32;color:#fff;">📌 Settle &amp; Close Today</button>
-        <button class="btn" id="fin-live-advance" style="display:none;">⚡ Step Live Day</button>
+        <button class="btn" id="fin-live-refresh" style="display:none;">Refresh quotes</button>
+        <button class="btn primary" id="fin-live-decide" style="display:none;">Run model decision</button>
+        <button class="btn" id="fin-live-settle" style="display:none;">Settle today</button>
+        <button class="btn" id="fin-live-advance" style="display:none;">Advance live day</button>
       </div>
       <div class="fin-status" id="fin-status" role="status"><span class="dot"></span><span id="fin-statusText">Preparing your portfolio…</span></div>
       <div class="fin-progress" aria-label="Simulation progress"><i id="fin-progress" style="width:0%"></i></div>
       <div class="note" id="fin-sessionInfo">1 January 2025 – 30 January 2026<br>270 trading sessions</div>
     </div>
-    <form class="card" id="fin-settings">
-      <h3>Paper account</h3>
+    <details class="card work-disclosure"><summary>Paper account settings</summary><form id="fin-settings">
       <label class="f" for="fin-capital">Starting capital (INR)</label>
       <input class="fin-capital" id="fin-capital" type="number" min="100" max="10000000" step="any" value="100000" required>
       <button class="btn fin-reset" type="submit">Reset portfolio</button>
       <div class="note" id="fin-resetNote">Restarts the same historical period with a fresh account.</div>
-    </form>
-    <details class="card"><summary>About this demonstration</summary>
-      <p class="note">The selected state-aware InternVL3-2B + LoRA RL adapter evaluates all 49 Nifty equities using live portfolio state and market technical indicators.</p>
-      <p class="note" id="fin-modeDesc">Mode 1 replays the primary 2025–2026 benchmark (+14.53% return). Mode 2 replays the 2026 daily trading history up to yesterday. Mode 3 continues from yesterday's portfolio on real-time live market data.</p>
-      <p class="note">Decision records show actual allocations, inputs and accounting. Generated Finance conversation was removed after factual testing.</p>
-      <p class="note" id="fin-source"></p>
+    </form></details>
+    <details class="card work-disclosure"><summary>Model &amp; data</summary>
+      <p class="note">The state-aware RL adapter uses portfolio positions and technical indicators for 49 Nifty equities.</p><p class="note" id="fin-source"></p>
     </details>
   </aside>
   <div class="fin-main">
-    <div class="fin-heading"><div><h2>Your paper portfolio</h2><div class="note" id="fin-headlineNote">Watch the trained portfolio act as the market unfolds.</div></div><span class="pill" id="fin-date">—</span></div>
+    <div class="workspace-title"><h2>Paper portfolio</h2><span id="fin-date"></span></div>
     <div id="fin-error" class="error" role="alert" hidden></div>
     <div class="kpis" aria-label="Portfolio overview">
       <div class="kpi"><div class="k">Portfolio value</div><div class="v" id="fin-equity">—</div><small id="fin-initial">—</small></div>
       <div class="kpi"><div class="k">Net gain / loss</div><div class="v" id="fin-gain">—</div><small id="fin-return">—</small></div>
-      <div class="kpi"><div class="k">Largest decline from peak</div><div class="v" id="fin-drawdown">—</div><small>Over the revealed history</small></div>
-      <div class="kpi"><div class="k">Trading fees</div><div class="v" id="fin-fees">—</div><small>Already deducted</small></div>
+      <div class="kpi"><div class="k">Max drawdown</div><div class="v" id="fin-drawdown">—</div></div>
+      <div class="kpi"><div class="k">Trading fees</div><div class="v" id="fin-fees">—</div></div>
     </div>
-    <div class="fin-columns">
-      <div class="fin-stack">
+    <div class="fin-overview">
       <div class="card">
         <div class="fin-toolbar"><h3>Portfolio performance</h3><label class="check" style="margin:0"><input id="fin-compare" type="checkbox" checked> Show benchmarks</label></div>
         <div class="note" id="fin-range">—</div>
@@ -576,12 +568,17 @@
         <div class="legend"><span><i class="fin-chart-legend" style="background:var(--accent)"></i>Trained portfolio</span><span><i class="fin-chart-legend" style="background:var(--muted)"></i>Untrained reference</span><span><i class="fin-chart-legend" style="background:var(--warn)"></i>Buy-and-hold</span></div>
         <p class="note">Net of modeled fees · INR · Same stocks and dates</p>
       </div>
-      <section class="card"><div class="fin-toolbar"><h3>Your holdings</h3><div class="fin-holdings-tools"><input id="fin-search" type="text" aria-label="Find a holding" placeholder="Find a stock…"><button class="btn" id="fin-exportHoldings">Export</button></div></div><div class="note" id="fin-holdingsCount">—</div><div class="scroll"><table><thead><tr><th>Stock</th><th>Value</th><th>Weight</th><th>Market P&amp;L¹</th></tr></thead><tbody id="fin-holdings"></tbody></table></div><p class="note" id="fin-cash"></p><p class="note">¹ Cumulative contribution before portfolio fees; not tax-lot realized profit.</p></section>
+    </div>
+    <div class="card fin-records">
+      <div class="record-switch" role="group" aria-label="Portfolio records">
+        <button data-record="holdings" aria-controls="fin-panel-holdings" aria-pressed="true">Holdings</button>
+        <button data-record="activity" aria-controls="fin-panel-activity" aria-pressed="false">Activity</button>
+        <button data-record="decision" aria-controls="fin-panel-decision" aria-pressed="false">Decision record</button>
       </div>
-      <div class="fin-stack">
-      <section class="card" aria-label="Decision inspector"><h3>Decision record <span class="sub">InternVL3-2B</span></h3><p class="note">Select an activity to inspect its recorded inputs and allocation.</p><div id="fin-decision"><div class="empty">Your first allocation will appear here.<br>Start the simulation to let the adapter act.</div></div></section>
-      <section class="card"><div class="fin-toolbar"><h3>Portfolio activity</h3><button class="btn" id="fin-exportActivity">Export activity</button></div><p class="note">Simulated purchases, sales and execution records</p><div id="fin-activity"></div><button class="btn fin-more" id="fin-more" hidden>Show more</button></section>
-      </div>
+      <section id="fin-panel-holdings" aria-label="Holdings"><div class="fin-toolbar"><span class="note" id="fin-holdingsCount"></span><div class="fin-holdings-tools"><input id="fin-search" type="text" aria-label="Find a holding" placeholder="Find a stock…"><button class="btn" id="fin-exportHoldings">Export</button></div></div>
+        <div class="scroll"><table><thead><tr><th>Stock</th><th>Value</th><th>Weight</th><th>Market P&amp;L¹</th></tr></thead><tbody id="fin-holdings"></tbody></table></div><p class="note" id="fin-cash"></p><p class="note">¹ Cumulative contribution before portfolio fees.</p></section>
+      <section id="fin-panel-activity" aria-label="Trading activity" hidden><button class="btn" id="fin-exportActivity">Export activity</button><div id="fin-activity"></div><button class="btn fin-more" id="fin-more" hidden>Show more</button></section>
+      <section id="fin-panel-decision" aria-label="Decision inspector" hidden><div id="fin-decision"></div></section>
     </div>
   </div>
 </div>
@@ -655,7 +652,7 @@ async function sse(url, body, onEvent, signal) {
   }
 }
 
-function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function cssVar(name) { return getComputedStyle(document.body).getPropertyValue(name).trim(); }
 
 /* ----- resident-adapter pill ----- */
 let statusTimer = null;
@@ -757,13 +754,25 @@ function refreshChatMenu() {
     const open = document.createElement('button'); open.className = 'chat-link'; open.textContent = title; open.title = title;
     if (id === conversationId) open.setAttribute('aria-current', 'page');
     open.onclick = () => openChat(id);
-    const menu = document.createElement('details'), toggle = document.createElement('summary');
-    toggle.textContent = '⋯'; toggle.setAttribute('aria-label', 'Actions for ' + title); menu.append(toggle);
+    const menu = document.createElement('div'); menu.className = 'row-tools';
+    const toggle = document.createElement('button'); toggle.className = 'row-more';
+    toggle.type = 'button'; toggle.textContent = '⋯'; toggle.setAttribute('aria-label', 'Actions for ' + title);
+    const actions = document.createElement('div'); actions.className = 'row-actions'; actions.hidden = true;
+    function closeActions() { actions.hidden = true; toggle.hidden = false; toggle.setAttribute('aria-expanded','false'); }
+    toggle.setAttribute('aria-expanded','false');
+    toggle.onclick = () => {
+      actions.hidden = false; toggle.setAttribute('aria-expanded','true');
+      actions.firstChild.focus(); toggle.hidden = true;
+    };
     for (const action of ['Rename', 'Delete']) {
-      const btn = document.createElement('button'); btn.textContent = action;
-      btn.onclick = () => { menu.open = false; editChat(id, title, action); };
-      menu.append(btn);
+      const btn = document.createElement('button'); btn.type = 'button'; btn.textContent = action;
+      btn.onclick = () => { closeActions(); toggle.focus(); editChat(id, title, action); };
+      actions.append(btn);
     }
+    menu.append(toggle, actions);
+    row.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') closeActions(); });
+    row.addEventListener('focusout', e => { if (!row.contains(e.relatedTarget)) closeActions(); });
+    row.addEventListener('keydown', e => { if (e.key === 'Escape') { closeActions(); toggle.focus(); } });
     row.append(open, menu); chatList.append(row);
   }
   if (!chatList.children.length) chatList.textContent = query ? 'No matching conversations' : 'Your chats will appear here.';
@@ -871,16 +880,22 @@ function userMsg(text, imgUrl) {
   const b = document.createElement('div'); b.className = 'bubble'; b.textContent = text; m.appendChild(b);
   thread.appendChild(m);
 }
+function waitingIndicator() {
+  return '<span class="thought-pulse" role="status" aria-label="Preparing a response">' +
+    '<i class="thought-sprite" aria-hidden="true"></i><span class="thought-words" aria-hidden="true">' +
+    ['Pondering', 'Connecting', 'Untangling', 'Reflecting'].map(word => '<span>' + word + '…</span>').join('') +
+    '</span></span>';
+}
 function assistantMsg() {
   const m = document.createElement('div'); m.className = 'msg assistant';
   const route = document.createElement('div'); route.className = 'route';
   const bubble = document.createElement('div'); bubble.className = 'bubble';
-  const ans = document.createElement('div'); ans.className = 'md typing'; ans.textContent = 'Routing…';
+  const ans = document.createElement('div'); ans.className = 'md typing'; ans.innerHTML = waitingIndicator();
   bubble.appendChild(ans); m.append(route, bubble); thread.appendChild(m);
   return { m, route, bubble, ans, text: '', think: null, thinkBody: null, thinkSum: null, raf: 0 };
 }
 function setRoute(ui, task) {
-  const labels = {general:'Polyvalent', deepfake:'Deepfake detection', reasoning:'Logical reasoning'};
+  const labels = {general:'Base', deepfake:'Deepfake detection', reasoning:'Logical reasoning'};
   ui.route.innerHTML = '<span class="tag ' + esc(task) + '">' + esc(labels[task] || TASK_LABEL[task] || task) + '</span>';
 }
 function showImageSelection(ui, id, position) {
@@ -890,11 +905,12 @@ function showImageSelection(ui, id, position) {
 }
 function copyAction(ui) {
   if (!ui.text && !ui.verdictText) return;
-  const btn = document.createElement('button'); btn.className = 'copy-answer'; btn.textContent = 'Copy';
+  const btn = document.createElement('button'); btn.className = 'copy-answer'; btn.title = 'Copy reply';
   btn.setAttribute('aria-label', 'Copy reply');
   btn.onclick = async () => {
-    try { await navigator.clipboard.writeText([ui.verdictText, ui.text].filter(Boolean).join('\n\n')); btn.textContent = 'Copied'; }
-    catch { btn.textContent = 'Copy unavailable'; }
+    try { await navigator.clipboard.writeText([ui.verdictText, ui.text].filter(Boolean).join('\n\n')); btn.dataset.copied = 'true'; btn.title = 'Copied'; btn.setAttribute('aria-label', 'Copied');
+      setTimeout(() => { delete btn.dataset.copied; btn.title = 'Copy reply'; btn.setAttribute('aria-label','Copy reply'); }, 1500); }
+    catch { btn.title = 'Copy unavailable'; btn.setAttribute('aria-label', btn.title); }
   };
   ui.m.append(btn);
 }
@@ -1135,10 +1151,10 @@ function verdictCard(ui, ev) {
 
     faces.forEach(f => {
       ui.faceReasonings[f.face_id] = {
-        text: f.reasoning || '',
+        text: f.reasoning || (ui.analysisId && Number(f.face_id) === Number(primaryId) ? ev.explanation : '') || '',
         thinking: '',
         done: Boolean(f.reasoning),
-        status: f.reasoning ? 'ready' : (Number(f.face_id) === Number(primaryId) ? 'generating' : 'pending'),
+        status: f.reasoning ? 'ready' : (!ui.analysisId && Number(f.face_id) === Number(primaryId) ? 'generating' : 'pending'),
         verdict: f.verdict,
         confidence: f.confidence,
         hotspots: f.hotspots,
@@ -1170,7 +1186,7 @@ function verdictCard(ui, ev) {
         st.innerHTML = '✓ Reasoning ready · Click to view';
       } else if (data.status === 'generating') {
         st.className = 'face-card-status busy';
-        st.innerHTML = '⏳ Generating reasoning…';
+        st.textContent = 'In progress';
       } else {
         st.className = 'face-card-status';
         st.innerHTML = 'Click to view reasoning';
@@ -1224,7 +1240,7 @@ function verdictCard(ui, ev) {
         if (data.text) {
           outputEl.innerHTML = md(data.text);
         } else if (data.status === 'generating') {
-          outputEl.innerHTML = `<p class="typing" style="margin:4px 0;">Generating forensic reasoning for Face #${fid}…</p>`;
+          outputEl.innerHTML = waitingIndicator();
         } else {
           outputEl.innerHTML = `
             <div class="face-reason-empty">
@@ -1283,6 +1299,7 @@ function verdictCard(ui, ev) {
       if (button) generateFace(Number(button.dataset.generateFace));
     });
     async function generateFace(fid) {
+      let faceNotice = '';
       ui.selectFace(fid);
       if (!ui.faceReasonings[fid]) {
         ui.faceReasonings[fid] = { text: '', thinking: '', done: false, status: 'generating' };
@@ -1304,7 +1321,8 @@ function verdictCard(ui, ev) {
           face_id: fid,
           image_base64: imgB64,
         }, ev => {
-          if (ev.event === 'face_start') {
+          if (ev.event === 'notice') faceNotice = ev.text;
+          else if (ev.event === 'face_start') {
             ui.faceReasonings[fid].status = 'generating';
             ui.updateFaceStatus(fid);
           } else if (ev.event === 'thinking') {
@@ -1322,10 +1340,11 @@ function verdictCard(ui, ev) {
             ui.selectFace(fid);
           }
         });
+        if (!ui.faceReasonings[fid].done) throw new Error(faceNotice || 'No explanation was returned.');
       } catch (err) {
         ui.faceReasonings[fid].status = 'error';
         ui.updateFaceStatus(fid);
-        if (outputEl) outputEl.innerHTML = `<p class="notice">Could not generate reasoning: ${esc(err.message || err)}</p>`;
+        if (outputEl && Number(ui.currentFaceId) === Number(fid)) outputEl.innerHTML = `<p class="notice">Could not generate reasoning: ${esc(err.message || err)}</p>`;
       }
     };
   }
@@ -1374,11 +1393,9 @@ async function ask() {
           break;
         case 'route':
           setRoute(ui, ev.task);
-          ui.ans.textContent = ev.task === 'general' ? 'Thinking…' : `Loading ${TASK_LABEL[ev.task] || ev.task}…`;
           break;
         case 'adapter': {
           setRoute(ui, ev.task);
-          if (!started) ui.ans.textContent = 'Thinking…';
           refreshStatus();
           break;
         }
@@ -1414,6 +1431,7 @@ async function ask() {
             if (ui.updateThinking) ui.updateThinking(fid);
           } else {
             addThinking(ui, ev.text);
+            if (!ui.text && !ui.ans.firstChild) ui.ans.innerHTML = waitingIndicator();
           }
           break;
         case 'face_done':
@@ -1444,6 +1462,11 @@ async function ask() {
     if (err.name === 'AbortError') { begin(); if (!ui.text) ui.ans.innerHTML = '<p class="note">Stopped.</p>'; }
     else { begin(); ui.ans.innerHTML = '<p class="notice">Connection error — is the server running?</p>'; }
   } finally {
+    ui.ans.querySelector('.thought-pulse')?.remove();
+    if (ui.faceReasonings) {
+      for (const face of Object.values(ui.faceReasonings)) if (face.status === 'generating') face.status = 'pending';
+      ui.selectFace(ui.currentFaceId);
+    }
     if (ui.raf) { cancelAnimationFrame(ui.raf); ui.raf = 0; }
     if (ui.text) ui.ans.innerHTML = md(ui.text);
     ui.ans.classList.remove('cursor', 'typing');
@@ -1604,8 +1627,10 @@ function fitCanvas(cv) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   return [ctx, w, design];
 }
-function drawAll() { if (!A.tl || !$('view-anomaly').classList.contains('active')) return; drawScore(); drawHeat(); drawTrace(); }
+function drawAll() { if (!A.tl || !$('view-anomaly').classList.contains('active')) return; drawScore(); if ($('sensorDetails').open) { drawHeat(); drawTrace(); } }
 window.addEventListener('resize', () => requestAnimationFrame(drawAll));
+window.addEventListener('polyvl-theme', () => requestAnimationFrame(drawAll));
+$('sensorDetails').addEventListener('toggle', () => { if ($('sensorDetails').open) requestAnimationFrame(drawAll); });
 
 function drawScore() {
   const tl = A.tl, [ctx, w, h] = fitCanvas($('scoreCanvas'));
@@ -1721,13 +1746,13 @@ function onEvent(ev) {
 
   // Render Model Anomaly Classification banner
   const diag = ev.diagnosis;
+  $('incSource').textContent = [diag?.source, diag?.verdict].filter(Boolean).join(' · ');
   const classEl = $('incClassification');
   if (classEl) {
     if (diag && (diag.predicted_fault_name || diag.predicted_class)) {
       const isNorm = diag.is_normal || diag.verdict === 'no_fault';
       const title = esc(diag.predicted_fault_name || diag.predicted_class);
       const conf = Math.round((diag.confidence || 0) * 100);
-      const src = esc(diag.source || 'L1 Classifier');
       const badge = isNorm ? 'NORMAL PROCESS (NO FAULT)' : diag.abstained ? 'UNCLASSIFIED EVENT' : 'MODEL CLASSIFIED ANOMALY';
       const badgeCol = isNorm ? 'var(--ok)' : 'var(--warn)';
       classEl.innerHTML = `
@@ -1736,9 +1761,6 @@ function onEvent(ev) {
           <div class="model-diag-title">${title}</div>
           <div class="model-diag-meta">
             <span>Confidence: <b>${conf}%</b></span>
-            <span>Verdict: <b>${esc(diag.verdict || 'classified')}</b></span>
-            <span>Subsystem: <b>${esc(e.candidate_subsystem || '').replace(/_/g, ' ')}</b></span>
-            <span>Classifier: <b>${src}</b></span>
           </div>
         </div>
       `;
@@ -1751,7 +1773,7 @@ function onEvent(ev) {
 
   $('evTable').innerHTML = '<tr><th>Sensor</th><th>Observed</th><th>Baseline</th><th>Dev %</th><th>z</th><th>Trend</th></tr>' +
     (e.top_anomalous_sensors || []).map(s => `<tr data-tag="${esc(s.name)}" style="cursor:pointer"><td title="${esc(s.name)}">${esc(s.display_name || s.name)}</td><td class="num">${fmt(s.current_value)}</td><td class="num">${fmt(s.baseline_value)}</td><td class="num">${s.deviation_percent > 0 ? '+' : ''}${fmt(s.deviation_percent)}</td><td class="num">${fmt(s.z_score)}</td><td>${esc(s.trend || '')}</td></tr>`).join('');
-  $('evTable').querySelectorAll('tr[data-tag]').forEach(r => r.onclick = () => { A.selected = r.dataset.tag; drawAll(); });
+  $('evTable').querySelectorAll('tr[data-tag]').forEach(r => r.onclick = () => { A.selected = r.dataset.tag; $('sensorDetails').open = true; drawAll(); });
   const seq = (e.temporal_sequence || {}).sequence || [];
   $('evSeq').innerHTML = seq.map(s => `<li><span class="t">+${Number(s.relative_time_minutes || 0).toFixed(1)} min</span><span>${esc(s.display_name || s.sensor)} <span class="note">${esc(s.event || '')}</span></span></li>`).join('');
   $('evLimits').innerHTML = (e.safety_limits_exceeded || []).map(l => `<div class="warnbox">${esc(l.limit_name)}: ${fmt(l.current)} vs limit ${fmt(l.threshold)} ${esc(l.unit || '')}</div>`).join('');
@@ -1797,7 +1819,7 @@ async function diagnose() {
   $('diagnosis').classList.remove('hidden');
   $('report').innerHTML = ''; $('raw').textContent = ''; $('rawWrap').open = false;
   $('truthCmp').innerHTML = ''; $('truthCmp').classList.add('hidden');
-  $('diagRoute').textContent = ''; $('diagStatus').textContent = 'Routing evidence through Laya…';
+  $('diagRoute').textContent = ''; $('diagStatus').innerHTML = waitingIndicator();
   $('diagBtn').disabled = true; pollStatus(true);
   let text = '';
   try {
@@ -1806,8 +1828,8 @@ async function diagnose() {
       values: ev.values
     };
     await sse('/anomaly/reason', reasonPayload, e => {
-      if (e.event === 'route') { $('diagRoute').textContent = `→ ${TASK_LABEL[e.task] || e.task}`; $('diagStatus').textContent = `Loading ${TASK_LABEL[e.task] || e.task}…`; }
-      else if (e.event === 'adapter') { $('diagRoute').textContent = `→ ${TASK_LABEL[e.task]} · ${e.cold ? 'loaded' + (e.swap_ms ? ' in ' + (e.swap_ms / 1000).toFixed(1) + 's' : '') : 'already loaded'}${e.unloaded && e.unloaded.length ? ' · swapped out ' + e.unloaded.join(', ') : ''}`; $('diagStatus').textContent = 'Writing root-cause report…'; refreshStatus(); }
+      if (e.event === 'route') { $('diagRoute').textContent = `→ ${TASK_LABEL[e.task] || e.task}`; }
+      else if (e.event === 'adapter') { $('diagRoute').textContent = TASK_LABEL[e.task] || e.task; refreshStatus(); }
       else if (e.event === 'token' || e.event === 'thinking') { text += e.text; $('raw').textContent = text; }
       else if (e.event === 'notice') { $('diagStatus').innerHTML = `<span class="notice">${esc(e.text)}</span>`; }
     }, ctl.signal);
@@ -1836,7 +1858,7 @@ async function askIncident(q) {
   const ev = A.event; q = (q || '').trim(); if (!ev || !q) return;
   $('qBox').value = '';
   const wrap = document.createElement('div');
-  wrap.innerHTML = `<div class="q">${esc(q)}</div><div class="a md typing">Thinking…</div>`;
+  wrap.innerHTML = `<div class="q">${esc(q)}</div><div class="a md typing">${waitingIndicator()}</div>`;
   $('qa').appendChild(wrap);
   const a = wrap.querySelector('.a'); let text = '';
   $('qSend').disabled = true; pollStatus(true);
@@ -1856,7 +1878,8 @@ $('qChips').querySelectorAll('.chip').forEach(c => c.onclick = () => askIncident
 
 /* ============================== boot ============================== */
 function setChatTheme(theme) {
-  document.body.dataset.chatTheme = theme;
+  document.documentElement.dataset.theme = theme;
+  window.dispatchEvent(new Event('polyvl-theme'));
   $('themeLight').setAttribute('aria-pressed', theme === 'light');
   $('themeDark').setAttribute('aria-pressed', theme === 'dark');
   const canvas = $('chatArtwork'), ctx = canvas.getContext('2d');

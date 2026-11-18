@@ -1,4 +1,4 @@
-/* Finance uses the original Polyvalent theme, card and control components. */
+/* Finance portfolio controls, charts and records. */
 #view-finance { overflow:hidden; align-items:stretch; justify-content:flex-start; padding:0; }
 .fin-layout { display:grid; grid-template-columns:300px minmax(0,1fr); gap:16px; padding:16px; width:100%; min-height:0; }
 .fin-side,.fin-main { min-width:0; min-height:0; overflow-y:auto; }

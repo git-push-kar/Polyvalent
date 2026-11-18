@@ -1,4 +1,4 @@
-# Polyvalent
+# PolyVL
 
 One pristine **InternVL3-2B** base, several task specialists, and one router.
 **Laya** (a System-1 decision model) reads each request and picks a task. The
@@ -81,7 +81,9 @@ follow-up such as "Explain that verdict" is routed again (normally `BASE`) and
 receives the recorded analysis — not a second forensic pass; an explicit rerun
 is what sends it back to `DEEPFAKE`.
 
-**Saved chats.** Use the searchable **Conversations** sidebar to reopen a chat or **New conversation** to start another. Each chat has a menu to rename or permanently delete it and its uploads. Light and dark modes are available at the bottom of the sidebar. Saved forensic replies reopen with the verdict, confidence, image evidence and per-face results from the original analysis. Completed replies and attachment rejection messages are saved locally in `data/chat_history.sqlite3`. Set `FINAL_CHAT_DB` to choose another path. The browser remembers the chat IDs, titles and last selection for this origin. Reopening a chat restores its transcript, uploads and recorded forensic results. Upload positions remain stable across restarts. This feature applies to the Chat tab only.
+The PolyVL demo shares a light/dark theme across Chat, Anomaly detection and Finance RL. The process monitor opens on the detector score and incident status. Expand **Explore sensors** for the heatmap, rankings and trace. Finance RL shows paper-account performance with separate **Holdings**, **Activity** and **Decision record** views. Select **View decision** on an activity to inspect its allocation and execution details.
+
+**Saved chats.** Use the searchable **Conversations** sidebar to reopen a chat or **New conversation** to start another. Each chat has a menu to rename or permanently delete it and its uploads. The theme switch is in the top navigation. Saved forensic replies reopen with the verdict, confidence, image evidence and per-face results from the original analysis. Completed replies and attachment rejection messages are saved locally in `data/chat_history.sqlite3`. Set `FINAL_CHAT_DB` to choose another path. The browser remembers the chat IDs, titles and last selection for this origin. Reopening a chat restores its transcript, uploads and recorded forensic results. Upload positions remain stable across restarts. This feature applies to the Chat tab only.
 
 Chat routes one image per turn. A current upload or image ID takes priority.
 Within six transcript entries of an upload, an implicit follow-up can use the
