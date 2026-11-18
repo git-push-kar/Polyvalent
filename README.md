@@ -80,6 +80,19 @@ follow-up such as "Explain that verdict" is routed again (normally `BASE`) and
 receives the recorded analysis — not a second forensic pass; an explicit rerun
 is what sends it back to `DEEPFAKE`.
 
+The routing state carries at most one asset: the image attached to this turn,
+or the active image when it arrived within the recent-message window (the
+upload turn plus six transcript entries, about three exchanges). A second
+asset in `assets` flips clear requests to BASE (measured: "do i look real"
+0.989 with one asset, 0.003 with two), so older uploads are not passed.
+
+When the conversation's history holds an unrelated topic (a description turn,
+for example), a direct authenticity question can still land on BASE. For that
+case the router scores the message once more against the image with empty
+history — the same single-turn state the checkpoint sees on its own — and a
+DEEPFAKE at 0.90 or above promotes the turn. The pass only promotes; it never
+overrides a DEEPFAKE the contextual state already chose.
+
 That exchange is not replayed raw into routing history: the checkpoint reads a
 prior authenticity request as work still pending, so a greeting after a verdict
 re-fired DEEPFAKE. `last_analysis` already carries the result, so the routing

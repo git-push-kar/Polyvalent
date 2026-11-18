@@ -34,6 +34,10 @@ SUPPORTED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP", "BMP"}
 ROUTING_TURN_CHARS = 700
 ROUTING_HISTORY_TURNS = 6
 GENERATION_HISTORY_TURNS = 6
+# How far back an image still counts as "in the recent messages" for the
+# single-turn routing pass: the upload turn plus the next six transcript
+# entries (about three user/assistant exchanges).
+RECENT_IMAGE_TURNS = 6
 
 
 @dataclass
@@ -49,6 +53,7 @@ class Asset:
     sha256: str = ""
     detail: str = ""
     added_at: float = field(default_factory=time.time)
+    added_turn: int = 0  # len(conversation.turns) when the image arrived
 
     def routing_view(self) -> Dict[str, Any]:
         """Exactly the asset shape the Router repository trained on."""
@@ -147,6 +152,16 @@ class Conversation:
         asset = self.active_asset()
         return asset if asset and asset.usable else None
 
+    def recent_image_id(self, max_turns: int = RECENT_IMAGE_TURNS
+                        ) -> Optional[str]:
+        """The active image, if it arrived within the recent-message window."""
+        asset = self.active_asset()
+        if not asset or not asset.usable:
+            return None
+        if len(self.turns) - asset.added_turn > max_turns:
+            return None
+        return asset.id
+
     # -- turns ----------------------------------------------------------
     def add_turn(self, role: str, content: str, kind: str = "chat") -> None:
         text = (content or "").strip()
@@ -224,7 +239,8 @@ class ConversationStore:
         with self._lock:
             conv = self.get_or_create(conversation_id)
             asset = Asset(id=asset_id or conv.next_asset_id(), data=raw,
-                          media_type=media_type or "")
+                          media_type=media_type or "",
+                          added_turn=len(conv.turns))
             if len(raw) > MAX_IMAGE_BYTES:
                 asset.availability, asset.support = "available", "unsupported"
                 asset.detail = f"image exceeds {MAX_IMAGE_BYTES // (1024 * 1024)} MB"
@@ -264,6 +280,37 @@ class ConversationStore:
             conv.updated_at = time.time()
 
     # -- views ----------------------------------------------------------
+    def recent_image_id(self, conversation_id: str,
+                        max_turns: int = RECENT_IMAGE_TURNS) -> Optional[str]:
+        with self._lock:
+            return self.get_or_create(conversation_id).recent_image_id(max_turns)
+
+    def routing_payload(self, conversation_id: str, message: str, *,
+                        attached_now: bool = False) -> Dict[str, Any]:
+        """The five-field state plus the two router-only hints.
+
+        `attached_now` is whether this request carried an image; the hints are
+        read by `TrainedLayaRouter` and never serialized into the gate input.
+
+        The state carries at most the one image this turn is about. The
+        checkpoint was trained on a single attachment, and a second (older)
+        asset in `assets` flips an unambiguous request to BASE (measured:
+        "do i look real" 0.989 -> 0.003). An image outside the recent-message
+        window is not passed at all, so an old upload cannot steer the gate.
+        """
+        state = self.routing_state(conversation_id, message)
+        recent = self.recent_image_id(conversation_id)
+        keep = state["active_image_id"] if (attached_now or recent) else None
+        if keep:
+            state["assets"] = [a for a in state["assets"] if a.get("id") == keep]
+            state["active_image_id"] = keep
+        else:
+            state["assets"] = []
+            state["active_image_id"] = None
+        state["attached_now"] = bool(attached_now)
+        state["recent_image_id"] = recent if keep else None
+        return state
+
     def routing_state(self, conversation_id: str, message: str) -> Dict[str, Any]:
         """The exact five-field input, populated from server-side state.
 

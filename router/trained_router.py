@@ -29,6 +29,13 @@ from .laya_gate import LayaGate, build_state, serialize, supported_asset_exists
 # trained with short history; the newest request is always kept in full.
 _MAX_HISTORY_TURNS = 6
 _MAX_TURN_CHARS = 700
+# A single-turn pass may overrule BASE only on an unambiguous DEEPFAKE.
+_SINGLE_TURN_FLOOR = 0.90
+# Re-running forensics on an image that is not attached is a bigger commitment
+# than answering from the saved analysis, so the contextual pass must be
+# near-certain. Measured on the same thread: "check it again" 0.992,
+# "is this real or fake" 0.994, greeting 0.64-0.86.
+_UNATTACHED_FLOOR = 0.95
 
 
 class TrainedLayaRouter(BaseRouter):
@@ -91,6 +98,34 @@ class TrainedLayaRouter(BaseRouter):
                  "active_image_id": state["active_image_id"],
                  "last_analysis": state["last_analysis"]}
 
+        promoted = None
+        if gate["route"] == "BASE":
+            # History can hold the conversation on the previous topic (a
+            # description turn keeps "do i look real" on BASE even with the
+            # image present). The same message scored on the image alone is
+            # the checkpoint's own view of the request, so a confident
+            # DEEPFAKE there wins. This only promotes; it never demotes.
+            promoted = self._single_turn(payload, steps)
+            if promoted is not None:
+                gate = promoted["gate"]
+                extra["gate"] = {k: v for k, v in gate.items() if k != "input"}
+                extra["router_input"] = gate.get("input")
+                extra["input_tokens"] = gate.get("input_tokens")
+                extra["single_turn_gate"] = promoted["view"]
+                extra["promotion"] = promoted["reason"]
+
+        if (gate["route"] == "DEEPFAKE" and promoted is None
+                and not payload.get("attached_now")
+                and float(gate["probability"]) < _UNATTACHED_FLOOR):
+            # An image from earlier in the thread, a message that is not an
+            # explicit request: answer from the saved state rather than
+            # loading the pipeline on a history-inflated signal.
+            extra["suppressed_deepfake"] = gate["probability"]
+            extra["base_reason"] = "gate:deepfake-below-unattached-floor"
+            gate = {**gate, "route": "BASE",
+                    "probability": round(1.0 - float(gate["probability"]), 4)}
+            extra["gate"] = {k: v for k, v in gate.items() if k != "input"}
+
         if gate["route"] == "DEEPFAKE":
             if not supported_asset_exists(state):
                 # The head asked for forensics, but there is no executable
@@ -103,14 +138,14 @@ class TrainedLayaRouter(BaseRouter):
             return RouterDecision(
                 router=self.name, task="deepfake",
                 confidence=float(gate["probability"]),
-                reason="gate:finetuned-deepfake",
+                reason=str(extra.get("promotion") or "gate:finetuned-deepfake"),
                 latency_ms=(time.perf_counter() - t0) * 1000.0,
                 steps=steps, abstained=False, extra=extra)
 
         return RouterDecision(
             router=self.name, task="general",
             confidence=float(gate["probability"]),
-            reason="gate:finetuned-base",
+            reason=str(extra.pop("base_reason", "gate:finetuned-base")),
             latency_ms=(time.perf_counter() - t0) * 1000.0,
             steps=steps, abstained=False, extra=extra)
 
@@ -124,6 +159,37 @@ class TrainedLayaRouter(BaseRouter):
             last_analysis=payload.get("last_analysis"),
             history=_routing_history(payload.get("history")),
         )
+
+    def _single_turn(self, payload: Dict[str, Any],
+                     steps: Dict[str, float]) -> Optional[Dict[str, Any]]:
+        """Score the message against the image with no history, if one is near.
+
+        Runs only when the image is attached to this request or arrived within
+        the recent-message window, so an old image cannot resurrect DEEPFAKE.
+        """
+        if not (payload.get("attached_now") or payload.get("recent_image_id")):
+            return None
+        state = build_state(
+            str(payload.get("message") or payload.get("text") or ""),
+            assets=_assets(payload),
+            active_image_id=payload.get("active_image_id"),
+            last_analysis=payload.get("last_analysis"),
+            history=[],
+        )
+        if not supported_asset_exists(state):
+            return None
+        state, dropped, tokens = self._fit(state)
+        with _clock(steps, "gate_single_turn"):
+            gate = self._gate.classify_state(state)
+        if gate is None or gate["route"] != "DEEPFAKE":
+            return None
+        if float(gate["probability"]) < _SINGLE_TURN_FLOOR:
+            return None
+        return {
+            "gate": gate,
+            "view": {k: v for k, v in gate.items() if k != "input"},
+            "reason": "gate:single-turn-deepfake",
+        }
 
     def _fit(self, state: Dict[str, Any]) -> tuple:
         """Drop oldest turns until the state fits; return (state, dropped, tokens).

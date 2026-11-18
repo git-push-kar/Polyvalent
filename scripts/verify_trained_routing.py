@@ -37,6 +37,9 @@ def _png() -> bytes:
     return buf.getvalue()
 
 
+FIELDS = ("message", "assets", "active_image_id", "last_analysis", "history")
+
+
 def main() -> int:
     store = ConversationStore()
     router = TrainedLayaRouter()
@@ -44,14 +47,17 @@ def main() -> int:
     raw = _png()
     failures = []
 
-    def ask(label: str, message: str, *, expect: str, image: bool = False) -> dict:
+    def ask(label: str, message: str, *, expect: str, image: bool = False,
+            attached: bool = False, conversation: str = conv) -> dict:
         if image:
-            store.add_image(conv, None, raw, media_type="image/png")
-        state = store.routing_state(conv, message)
+            store.add_image(conversation, None, raw, media_type="image/png")
+        state = store.routing_payload(
+            conversation, message, attached_now=image or attached)
         decision = router.route(state)
         gate = (decision.extra or {}).get("gate") or {}
         print(f"\n--- {label}")
-        print("router input:", serialize(state)[:600])
+        print("router input:", serialize(
+            {k: state[k] for k in FIELDS})[:600])
         print("gate output :", json.dumps(
             {k: gate.get(k) for k in ("route", "probability", "probabilities")}))
         print("decision    :", decision.task, "|", decision.reason,
@@ -92,6 +98,49 @@ def main() -> int:
         ask(f"greeting after verdict: {greeting!r}", greeting, expect="general")
     ask("explicit rerun still deepfake",
         "check it again", expect="deepfake")
+
+    # Attached image after a description turn: history alone keeps this on
+    # BASE, the single-turn image pass is the checkpoint's 98.9% DEEPFAKE.
+    shot = "chat_attached"
+    store.add_image(shot, None, raw, media_type="image/png")
+    store.add_turn(shot, "user", "what do i look like")
+    store.add_turn(shot, "assistant",
+                   "You are wearing a black shirt in an outdoor parking "
+                   "lot with cars in the background.")
+    ask("attached image, describe history: do i look real", "do i look real",
+        expect="deepfake", image=True, conversation=shot)
+    ask("attached image, greeting", "hello", expect="general",
+        attached=True, conversation=shot)
+    ask("attached image, appearance question", "what do i look like",
+        expect="general", attached=True, conversation=shot)
+    ask("attached image, explanation", "explain that verdict",
+        expect="general", attached=True, conversation=shot)
+
+    # Mixed thread: appearance turn, then a verdict, then neutral messages.
+    mixed = "chat_mixed"
+    store.add_image(mixed, None, raw, media_type="image/png")
+    store.add_turn(mixed, "user", "what do i look like")
+    store.add_turn(mixed, "assistant",
+                   "I don't have a physical appearance. How can I assist you further?")
+    store.record_analysis(mixed, Analysis(
+        id="an_m", image_id="img_1", verdict="REAL", confidence=0.601,
+        hotspots="Peripheral / Ear & Hair blending seams",
+        spectral="HF/LF log-magnitude energy ratio=0.20",
+        explanation="No detectable artefacts."))
+    ask("greeting with a verdict in a mixed thread", "hello",
+        expect="general", conversation=mixed)
+    ask("explicit rerun in a mixed thread", "check it again",
+        expect="deepfake", conversation=mixed)
+    ask("authenticity ask in a mixed thread", "is this real or fake?",
+        expect="deepfake", conversation=mixed)
+
+    stale = "chat_stale"
+    store.add_image(stale, None, raw, media_type="image/png")
+    for i in range(4):
+        store.add_turn(stale, "user", f"unrelated question {i}")
+        store.add_turn(stale, "assistant", f"unrelated answer {i}")
+    ask("old image outside the window: do i look real", "do i look real",
+        expect="general", conversation=stale)
 
     print("\n--- generation context for case 3")
     ctx = store.generation_context(conv, image_id=asset.id)

@@ -491,7 +491,9 @@ def _routing_trace(decision) -> Dict[str, Any]:
             "input_tokens": extra.get("input_tokens"),
             "input_budget": extra.get("input_budget"),
             "history_turns": extra.get("history_turns"),
-            "history_dropped": extra.get("history_dropped")}
+            "history_dropped": extra.get("history_dropped"),
+            "promotion": extra.get("promotion"),
+            "single_turn": extra.get("single_turn_gate")}
 
 
 def _chat_stream(req: ChatRequest):
@@ -539,7 +541,9 @@ def _chat_stream(req: ChatRequest):
             latency_ms=0.0, steps={}, abstained=False,
             extra={"gate": None, "router_input": None})
     else:
-        state = store.routing_state(conversation_id, req.message)
+        state = store.routing_payload(
+            conversation_id, req.message,
+            attached_now=bool(req.image_base64 or req.image_ids))
         decision = _route_trained(state)
 
     log_record: Dict[str, Any] = {
