@@ -81,7 +81,7 @@ follow-up such as "Explain that verdict" is routed again (normally `BASE`) and
 receives the recorded analysis — not a second forensic pass; an explicit rerun
 is what sends it back to `DEEPFAKE`.
 
-**Saved chats.** Use **Chat history** to reopen a conversation or **New chat** to start another. Completed replies and attachment rejection messages are saved locally in `data/chat_history.sqlite3`. Set `FINAL_CHAT_DB` to choose another path. The browser remembers the chat IDs, titles and last selection for this origin. Reopening a chat restores its transcript, uploads and recorded forensic results. Upload positions remain stable across restarts. This feature applies to the Chat tab only.
+**Saved chats.** Use the searchable **Conversations** sidebar to reopen a chat or **New conversation** to start another. Each chat has a menu to rename or permanently delete it and its uploads. Light and dark modes are available at the bottom of the sidebar. Saved forensic replies reopen with the verdict, confidence, image evidence and per-face results from the original analysis. Completed replies and attachment rejection messages are saved locally in `data/chat_history.sqlite3`. Set `FINAL_CHAT_DB` to choose another path. The browser remembers the chat IDs, titles and last selection for this origin. Reopening a chat restores its transcript, uploads and recorded forensic results. Upload positions remain stable across restarts. This feature applies to the Chat tab only.
 
 Chat routes one image per turn. A current upload or image ID takes priority.
 Within six transcript entries of an upload, an implicit follow-up can use the

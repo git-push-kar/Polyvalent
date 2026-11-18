@@ -456,3 +456,23 @@ def test_saved_chat_survives_reopening_database(tmp_path):
     srv._CONVERSATIONS = ConversationStore(db)
     assert len(client.get(f"/chat/history/{cid}").json()["turns"]) == 6
     assert srv.get_conversations().get(cid).next_asset_id() == "img_3"
+
+    # Pre-presentation snapshots linked a forensic turn only by its exact saved summary.
+    store = srv.get_conversations()
+    conv = store.get(cid)
+    conv.turns[1].pop("analysis_id")
+    conv.turns[1].pop("task")
+    store.save(cid)
+    srv._CONVERSATIONS = ConversationStore(db)
+    history_url = f"/chat/history/{cid}"
+    replay = client.get(history_url).json()
+    analysis = replay["analyses"][replay["turns"][1]["analysis_id"]]
+    assert analysis["id"] == recorded["analysis_id"] and analysis["image_id"] == "img_1"
+    assert analysis["verdict"] == recorded["verdict"]
+    assert client.patch(history_url, json={"title": "Portrait review"}).status_code == 200
+    srv._CONVERSATIONS = ConversationStore(db)
+    assert client.get(history_url).json()["title"] == "Portrait review"
+    assert client.delete(history_url).status_code == 204
+    srv._CONVERSATIONS = ConversationStore(db)
+    assert client.get(history_url).status_code == 404
+    assert client.get(history_url + "/images/img_1").status_code == 404

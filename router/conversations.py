@@ -160,6 +160,7 @@ class Analysis:
     faces_analyzed: int = 1
     routing_path: str = "passthrough"
     faces: List[Dict[str, Any]] = field(default_factory=list)
+    primary_face_id: Optional[int] = None
 
     def routing_view(self) -> Dict[str, Any]:
         """`last_analysis` in the Router archive's exact field structure.
@@ -221,6 +222,7 @@ class Analysis:
 class Conversation:
     def __init__(self, conversation_id: str) -> None:
         self.id = conversation_id
+        self.title = ""
         self.created_at = time.time()
         self.updated_at = self.created_at
         self.turns: List[Dict[str, Any]] = []
@@ -395,7 +397,7 @@ class ConversationStore:
         with self._lock, closing(self._connect()) as db, db:
             conv = self._conversations[conversation_id]
             state = {
-                "turns": conv.turns, "active_image_id": conv.active_image_id,
+                "turns": conv.turns, "title": conv.title, "active_image_id": conv.active_image_id,
                 "upload_ids": conv.upload_ids, "asset_seq": conv._asset_seq,
                 "created_at": conv.created_at, "updated_at": conv.updated_at,
                 "analyses": [asdict(a) for a in conv.analyses],
@@ -426,6 +428,7 @@ class ConversationStore:
                 images = dict(db.execute("SELECT id,data FROM chat_images WHERE chat=?", (conversation_id,)))
             conv = Conversation(conversation_id)
             conv.turns = state["turns"]
+            conv.title = state.get("title", "")
             conv.active_image_id = state["active_image_id"]
             conv.upload_ids = state["upload_ids"]
             conv._asset_seq = state["asset_seq"]
@@ -443,6 +446,14 @@ class ConversationStore:
                 conv = Conversation(conversation_id)
                 self._conversations[conversation_id] = conv
             return conv
+
+    def delete(self, conversation_id: str) -> None:
+        with self._lock:
+            if self.database is not None and self.database.exists():
+                with closing(self._connect()) as db, db:
+                    db.execute("DELETE FROM chat_images WHERE chat=?", (conversation_id,))
+                    db.execute("DELETE FROM chats WHERE id=?", (conversation_id,))
+            self._conversations.pop(conversation_id, None)
 
     def ids(self) -> List[str]:
         with self._lock:

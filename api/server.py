@@ -36,6 +36,7 @@ import logging
 import os
 import time
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Iterator, List, Literal, Optional
 
@@ -732,6 +733,7 @@ def _chat_turn(req, store, conv):
                     faces_analyzed=int(verdict.get("faces_analyzed", 1)),
                     routing_path=str(verdict.get("routing_path", "passthrough")),
                     faces=faces_data,
+                    primary_face_id=verdict.get("primary_face_id"),
                 )
                 store.record_analysis(conversation_id, result)
                 answer_parts.append(result.history_text())
@@ -785,6 +787,9 @@ def _chat_turn(req, store, conv):
     answer = "".join(answer_parts).strip()
     if answer:
         store.add_turn(conversation_id, "assistant", answer, kind=turn_kind, image_id=image_id)
+        conv.turns[-1]["task"] = task
+        if task == "deepfake":
+            conv.turns[-1]["analysis_id"] = result.id
     store.save(conversation_id)
     _log_chat_run({**log_record, "outcome": "answered", **gen,
                    "conversation_id": conversation_id})
@@ -796,9 +801,61 @@ def chat_history(conversation_id: str):
     conv = get_conversations().get(conversation_id)
     if conv is None:
         raise HTTPException(404, "Chat not found")
-    return {"conversation_id": conv.id, "turns": list(conv.turns),
+    # Older chat snapshots have the recorded summary but no analysis ID on the turn.
+    from collections import defaultdict, deque
+    by_summary = defaultdict(deque)
+    for analysis in conv.analyses:
+        by_summary[(analysis.image_id, analysis.history_text())].append(analysis.id)
+    turns = []
+    for turn in conv.turns:
+        turn = dict(turn)
+        if turn["role"] == "assistant" and turn.get("kind") == "analysis":
+            matches = by_summary[(turn.get("image_id"), turn["content"])]
+            if matches:
+                turn.setdefault("analysis_id", matches.popleft())
+        turns.append(turn)
+    return {"conversation_id": conv.id, "title": conv.title, "turns": turns,
+            "analyses": {a.id: asdict(a) for a in conv.analyses},
             "uploads": [{"id": a.id, "usable": a.usable}
                         for a in conv.assets.values() if a.id in conv.upload_ids]}
+
+
+class ChatTitle(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+@app.patch("/chat/history/{conversation_id}")
+def rename_chat(conversation_id: str, body: ChatTitle):
+    store = get_conversations()
+    conv = store.get(conversation_id)
+    if conv is None:
+        raise HTTPException(404, "Chat not found")
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(422, "Enter a chat name")
+    if not conv.request_lock.acquire(blocking=False):
+        raise HTTPException(409, "Wait for the current reply to finish")
+    try:
+        conv.title = title
+        store.save(conv.id)
+    finally:
+        conv.request_lock.release()
+    return {"title": title}
+
+
+@app.delete("/chat/history/{conversation_id}", status_code=204)
+def delete_chat(conversation_id: str):
+    store = get_conversations()
+    conv = store.get(conversation_id)
+    if conv is None:
+        raise HTTPException(404, "Chat not found")
+    if not conv.request_lock.acquire(blocking=False):
+        raise HTTPException(409, "Wait for the current reply to finish")
+    try:
+        store.delete(conv.id)
+    finally:
+        conv.request_lock.release()
+    return Response(status_code=204)
 
 
 @app.get("/chat/history/{conversation_id}/images/{image_id}")
@@ -817,6 +874,8 @@ def chat_stream(req: ChatRequest):
 
 
 class FaceReasonRequest(BaseModel):
+    image_id: Optional[str] = None
+    analysis_id: Optional[str] = None
     conversation_id: Optional[str] = None
     face_id: int
     image_base64: Optional[str] = None
@@ -834,7 +893,7 @@ def _reason_face_stream(req: FaceReasonRequest):
             raw_bytes = None
     elif req.conversation_id:
         conv = store.get(req.conversation_id)
-        asset = conv.usable_asset() if conv else None
+        asset = (conv.assets.get(req.image_id) if req.image_id else conv.usable_asset()) if conv else None
         if asset:
             raw_bytes = asset.data
     if not raw_bytes:
@@ -846,6 +905,15 @@ def _reason_face_stream(req: FaceReasonRequest):
         with service.lease("deepfake"):
             for chunk in service.reason_single_face_stream(
                     raw_bytes, face_id=req.face_id, max_new_tokens=req.max_new_tokens):
+                if chunk.get("event") == "face_done" and req.analysis_id and req.conversation_id:
+                    conv = store.get(req.conversation_id)
+                    if conv:
+                        analysis = next((a for a in conv.analyses if a.id == req.analysis_id
+                                         and a.image_id == req.image_id), None)
+                        face = next((f for f in analysis.faces if f["face_id"] == req.face_id), None) if analysis else None
+                        if face and chunk.get("text"):
+                            face["reasoning"] = chunk["text"]
+                            store.save(conv.id)
                 yield _sse(chunk)
         yield _sse({"event": "done"})
     except Exception as exc:

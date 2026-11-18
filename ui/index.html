@@ -59,9 +59,6 @@
 
   /* ---------------- chat ---------------- */
   #view-chat { flex-direction: column; }
-  .chat-history { display:flex; align-items:center; gap:8px; padding:8px 16px; }
-  .chat-history select { font:inherit; max-width:min(75vw,32rem); padding:4px 8px; }
-  .chat-history small { color:var(--muted); }
   #log { flex: 1; overflow-y: auto; padding: 24px 16px 8px; }
   .thread { max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
   .empty { text-align: center; padding: 8vh 12px 0; }
@@ -227,7 +224,6 @@
     display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; flex-wrap: wrap; gap: 6px;
   }
   .reasoning-title-text { font-weight: 700; font-size: 13.5px; color: var(--text); }
-  .reasoning-chars-pill { font-size: 11.5px; color: var(--muted); }
   .face-reason-empty {
     padding: 14px; text-align: center; background: var(--panel-2); border-radius: 8px; margin-top: 6px;
   }
@@ -351,6 +347,7 @@
     .bar { grid-template-columns: 110px 1fr 40px; }
   }
 </style>
+<link rel="stylesheet" href="/ui/chat.css">
 <link rel="stylesheet" href="/ui/finance.css">
 </head>
 <body>
@@ -369,33 +366,28 @@
 <main>
   <!-- ======================= CHAT ======================= -->
   <section class="view" id="view-chat" role="tabpanel" aria-labelledby="tab-chat">
-    <div class="chat-history">
-      <label for="chatHistorySelect">Chat history</label>
-      <select id="chatHistorySelect"><option value="">New chat</option></select>
-      <small id="historyStatus" role="status"></small>
-    </div>
-    <div id="log" aria-live="polite">
-      <div class="thread" id="thread">
-        <div class="empty" id="empty">
-          <h2>What can I help with?</h2>
-          <p>Laya routes each message to the right specialist and loads only that adapter.</p>
-          <div class="chips">
-            <button class="chip" data-prompt="Alice is taller than Bob, and Bob is taller than Carol. Who is the shortest? Explain step by step."><b>Logic puzzle</b><span>Loads the reasoning adapter</span></button>
-            <button class="chip" data-attach="1" data-prompt="Is this face photo real or fake?"><b>Check a face photo</b><span>Attach an image → deepfake adapter</span></button>
-            <button class="chip" data-prompt="Should I take the train or drive to work if it's raining and the train is 10 minutes slower?"><b>Decide between options</b><span>Reasoning adapter</span></button>
-            <button class="chip" data-prompt="Explain what a LoRA adapter is in two sentences."><b>Ask anything</b><span>Answered by the base model</span></button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <aside class="chat-rail" id="chatRail" aria-label="Conversation sidebar">
+      <button id="newChat" class="start-chat"><span aria-hidden="true">＋</span> New conversation</button>
+      <label class="chat-search"><span aria-hidden="true">⌕</span><input id="chatSearch" type="search" aria-label="Search conversations" placeholder="Search chats"></label>
+      <h2>Conversations</h2><div id="chatList"></div><small id="historyStatus" role="status"></small>
+      <div class="theme-controls" aria-label="Chat theme"><button id="themeLight">☀ &nbsp;Light</button><button id="themeDark">☾ &nbsp;Dark</button></div>
+    </aside>
+    <div class="chat-main"><div class="chat-bar"><button id="railToggle" aria-controls="chatRail" aria-expanded="false" aria-label="Toggle conversations">☰</button><span id="chatTitle">New conversation</span></div>
+    <div id="log" aria-live="polite"><div class="thread" id="thread"><div class="empty" id="empty">
+      <div class="welcome"><h2>What would you like<br>to <em>explore?</em></h2><canvas id="chatArtwork" width="540" height="420" aria-hidden="true"></canvas></div>
+      <div class="chips">
+        <button class="chip" data-prompt="Explain how a language model learns, in simple terms."><i aria-hidden="true">✦</i><b>Explore an idea</b><span>Ask a question <strong>↗</strong></span></button>
+        <button class="chip" data-attach="1" data-prompt="Check whether this image is real or fake."><i aria-hidden="true">◎</i><b>Inspect an image</b><span>Deepfake detection <strong>↗</strong></span></button>
+        <button class="chip" data-reason="1" data-prompt="Alice is taller than Bob, and Bob is taller than Carol. Who is shortest? Explain your reasoning."><i aria-hidden="true">⑂</i><b>Work through a puzzle</b><span>Logical reasoning <strong>↗</strong></span></button>
+      </div></div></div></div>
     <div class="composer-wrap">
       <div class="composer">
         <div class="attach-preview" id="attachPreview"><img id="attachImg" alt="attached image preview"><span id="attachName"></span><button id="attachClear" title="Remove image" aria-label="Remove image">&times;</button></div>
         <div class="composer-row">
           <button class="icon-btn" id="attachBtn" title="Attach a face image (routes to deepfake analysis)" aria-label="Attach image"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 11.6 12 20.1a5 5 0 0 1-7.1-7.1l8.6-8.6a3.4 3.4 0 1 1 4.8 4.8l-8.3 8.3a1.8 1.8 0 0 1-2.6-2.6l7.6-7.5"/></svg></button>
           <input type="file" id="img" accept="image/*" hidden>
-          <button class="icon-btn" id="newChat" title="New chat" aria-label="New chat">＋</button>
-          <textarea id="box" rows="1" placeholder="Message Polyvalent…  (Enter to send, Shift+Enter for a new line)"></textarea>
+
+          <textarea id="box" rows="1" placeholder="Message Polyvalent…"></textarea>
           <label class="switch" id="deepThinkWrap" title="Deep thinking — pin this message to the reasoning adapter">
             <input type="checkbox" id="deepThink">
             <span class="track"><span class="knob"></span></span>
@@ -404,8 +396,10 @@
           <button class="send" id="send" aria-label="Send">↑</button>
         </div>
       </div>
-      <div class="hint">Routing is automatic: general chat → base model · logic &amp; decisions → reasoning adapter · face images → deepfake adapter · TEP faults → anomaly adapter. “Deep thinking” pins the next messages to the reasoning adapter.</div>
-    </div>
+    </div></div>
+    <dialog id="chatDialog"><form id="chatDialogForm"><h2 id="dialogTitle"></h2><p id="dialogText"></p>
+      <input id="dialogName" maxlength="120" autocomplete="off" aria-label="Conversation name">
+      <div><button type="button" id="dialogCancel">Cancel</button><button id="dialogSubmit">Save</button></div></form></dialog>
   </section>
 
   <!-- ======================= ANOMALY ======================= -->
@@ -744,7 +738,7 @@ $('deepThink').onchange = () => {
   box.focus();
 };
 const emptyState = $('empty');
-const historySelect = $('chatHistorySelect');
+const chatList = $('chatList');
 const indexKey = 'polyvalent.chat.index.v1';
 const activeKey = 'polyvalent.chat.active.v1';
 let restoring = false;
@@ -754,9 +748,26 @@ function chatIndex() {
 }
 
 function refreshChatMenu() {
-  historySelect.replaceChildren(new Option('New chat', ''));
-  for (const {id, title} of chatIndex()) historySelect.add(new Option(title, id));
-  historySelect.value = conversationId || '';
+  const index = chatIndex();
+  $('chatTitle').textContent = index.find(c => c.id === conversationId)?.title || 'New conversation';
+  chatList.replaceChildren();
+  const query = $('chatSearch').value.trim().toLowerCase();
+  for (const {id, title} of index.filter(c => c.title.toLowerCase().includes(query))) {
+    const row = document.createElement('div'); row.className = 'chat-item';
+    const open = document.createElement('button'); open.className = 'chat-link'; open.textContent = title; open.title = title;
+    if (id === conversationId) open.setAttribute('aria-current', 'page');
+    open.onclick = () => openChat(id);
+    const menu = document.createElement('details'), toggle = document.createElement('summary');
+    toggle.textContent = '⋯'; toggle.setAttribute('aria-label', 'Actions for ' + title); menu.append(toggle);
+    for (const action of ['Rename', 'Delete']) {
+      const btn = document.createElement('button'); btn.textContent = action;
+      btn.onclick = () => { menu.open = false; editChat(id, title, action); };
+      menu.append(btn);
+    }
+    row.append(open, menu); chatList.append(row);
+  }
+  if (!chatList.children.length) chatList.textContent = query ? 'No matching conversations' : 'Your chats will appear here.';
+
 }
 
 function rememberChat(id, message) {
@@ -770,7 +781,7 @@ function rememberChat(id, message) {
 async function openChat(id) {
   if (controller || restoring) return;
   restoring = true;
-  historySelect.disabled = $('newChat').disabled = sendBtn.disabled = true;
+  chatList.inert = $('newChat').disabled = sendBtn.disabled = true;
   $('historyStatus').textContent = id ? 'Opening chat\u2026' : '';
   try {
     let saved = {turns: [], uploads: []};
@@ -791,11 +802,21 @@ async function openChat(id) {
       } else {
         const ui = assistantMsg();
         ui.ans.classList.remove('typing');
-        ui.ans.innerHTML = md(turn.content);
-        if (turn.image_id) ui.route.textContent = 'Using ' + turn.image_id;
+        const analysis = saved.analyses?.[turn.analysis_id];
+        ui.chatId = id; ui.imageId = turn.image_id;
+        if (turn.image_id) ui.imgUrl = '/chat/history/' + encodeURIComponent(id) + '/images/' + encodeURIComponent(turn.image_id);
+        if (turn.task || analysis) setRoute(ui, turn.task || 'deepfake');
+        if (turn.image_id) showImageSelection(ui, turn.image_id);
+        if (analysis) { ui.analysisId = analysis.id; verdictCard(ui, analysis); }
+        ui.text = analysis ? analysis.explanation : turn.content;
+        ui.ans.innerHTML = md(ui.text);
+        copyAction(ui);
       }
     }
     conversationId = id || null;
+    $('view-chat').classList.remove('rail-open');
+    $('railToggle').setAttribute('aria-expanded', 'false');
+    if (saved.title) localStorage.setItem(indexKey, JSON.stringify(chatIndex().map(c => c.id === id ? {...c,title:saved.title} : c)));
     if (id) localStorage.setItem(activeKey, id);
     else localStorage.removeItem(activeKey);
     $('historyStatus').textContent = '';
@@ -803,15 +824,43 @@ async function openChat(id) {
   } catch (e) {
     $('historyStatus').textContent = e.message;
   } finally {
-    historySelect.value = conversationId || '';
+    refreshChatMenu();
     restoring = false;
-    historySelect.disabled = $('newChat').disabled = sendBtn.disabled = false;
+    chatList.inert = $('newChat').disabled = sendBtn.disabled = false;
   }
 }
-historySelect.onchange = () => openChat(historySelect.value);
+$('chatSearch').oninput = refreshChatMenu;
+$('railToggle').onclick = () => $('railToggle').setAttribute('aria-expanded', String($('view-chat').classList.toggle('rail-open')));
+function editChat(id, title, action) {
+  const del = action === 'Delete', dlg = $('chatDialog'), input = $('dialogName');
+  $('dialogTitle').textContent = action + ' conversation';
+  $('dialogText').textContent = del ? 'Delete “' + title + '” and its saved uploads? This is permanent.' : '';
+  input.hidden = del; input.required = !del; input.value = title;
+  $('dialogSubmit').textContent = del ? 'Delete' : 'Save name';
+  $('dialogCancel').onclick = () => dlg.close();
+  $('chatDialogForm').onsubmit = async event => {
+    event.preventDefault();
+    const name = input.value.trim();
+    if (!del && !name) { input.focus(); return; }
+    $('dialogSubmit').disabled = true;
+    try {
+      const result = await fetch('/chat/history/' + encodeURIComponent(id), del ? {method:'DELETE'} :
+        {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({title:name})});
+      if (!result.ok && !(del && result.status === 404)) throw Error('Could not update this conversation. Please try again.');
+      const index = del ? chatIndex().filter(c => c.id !== id) : chatIndex().map(c => c.id === id ? {...c,title:name} : c);
+      localStorage.setItem(indexKey, JSON.stringify(index));
+      if (del && id === conversationId) await openChat('');
+      refreshChatMenu(); dlg.close();
+    } catch (e) { $('dialogText').textContent = e.message; }
+    finally { $('dialogSubmit').disabled = false; }
+  };
+  dlg.showModal();
+  if (del) $('dialogCancel').focus(); else { input.focus(); input.select(); }
+}
 $('newChat').onclick = () => openChat('');
 document.querySelectorAll('#empty .chip').forEach(c => c.onclick = () => {
   box.value = c.dataset.prompt; autosize();
+  if (c.dataset.reason && !$('deepThink').checked) $('deepThink').click();
   if (c.dataset.attach) { $('img').click(); return; }
   ask();
 });
@@ -828,10 +877,26 @@ function assistantMsg() {
   const bubble = document.createElement('div'); bubble.className = 'bubble';
   const ans = document.createElement('div'); ans.className = 'md typing'; ans.textContent = 'Routing…';
   bubble.appendChild(ans); m.append(route, bubble); thread.appendChild(m);
-  return { m, route, bubble, ans, text: '', think: null, thinkBody: null, thinkSum: null, thinkChars: 0, raf: 0 };
+  return { m, route, bubble, ans, text: '', think: null, thinkBody: null, thinkSum: null, raf: 0 };
 }
-function setRoute(ui, task, note) {
-  ui.route.innerHTML = `<span class="tag ${esc(task)}">${esc(TASK_LABEL[task] || task)}</span>` + (note ? `<span>${esc(note)}</span>` : '');
+function setRoute(ui, task) {
+  const labels = {general:'Polyvalent', deepfake:'Deepfake detection', reasoning:'Logical reasoning'};
+  ui.route.innerHTML = '<span class="tag ' + esc(task) + '">' + esc(labels[task] || TASK_LABEL[task] || task) + '</span>';
+}
+function showImageSelection(ui, id, position) {
+  const label = document.createElement('div'); label.className = 'image-ref';
+  label.textContent = 'Using ' + id + (position ? ' · ' + position : '');
+  ui.m.insertBefore(label, ui.bubble);
+}
+function copyAction(ui) {
+  if (!ui.text && !ui.verdictText) return;
+  const btn = document.createElement('button'); btn.className = 'copy-answer'; btn.textContent = 'Copy';
+  btn.setAttribute('aria-label', 'Copy reply');
+  btn.onclick = async () => {
+    try { await navigator.clipboard.writeText([ui.verdictText, ui.text].filter(Boolean).join('\n\n')); btn.textContent = 'Copied'; }
+    catch { btn.textContent = 'Copy unavailable'; }
+  };
+  ui.m.append(btn);
 }
 function renderAnswer(ui) {
   if (ui.raf) return;
@@ -844,8 +909,8 @@ function addThinking(ui, text) {
     d.append(s, b); ui.bubble.insertBefore(d, ui.ans);
     ui.think = d; ui.thinkBody = b; ui.thinkSum = s;
   }
-  ui.thinkBody.textContent += text; ui.thinkChars += text.length;
-  ui.thinkSum.textContent = 'Reasoning · ' + ui.thinkChars.toLocaleString() + ' chars';
+  ui.thinkBody.textContent += text;
+  ui.thinkSum.textContent = 'Reasoning';
 }
 function drawFaceBoxesOnCanvas(canvas, imgUrl, faces, primaryId, onFaceClick) {
   const img = new Image();
@@ -951,14 +1016,15 @@ function verdictCard(ui, ev) {
   let yoloHtml = '';
   const path = ev.routing_path || (ev.faces && ev.faces.length > 1 ? 'per_face' : 'passthrough');
   const faces = Array.isArray(ev.faces) ? ev.faces : [];
-  const primaryId = ev.primary_face_id || (faces.length > 0 ? faces[0].face_id : 1);
+  const primaryId = ev.primary_face_id || [...faces].sort((a,b) => b.p_fake - a.p_fake || a.face_id - b.face_id)[0]?.face_id || 1;
+  ui.verdictText = [ev.image_id, ev.verdict, conf.toFixed(1) + '% confidence', ev.hotspots, ev.spectral].filter(Boolean).join(' · ');
 
   if (path === 'per_face' && faces.length > 0) {
     yoloHtml += `
       <div class="yolo-banner">
         <div class="yolo-icon">🎯</div>
         <div class="yolo-info">
-          <div class="yolo-title">YOLOv8 Multi-Face Pipeline Activated</div>
+          <div class="yolo-title">Multi-face analysis</div>
           <div class="yolo-desc">Detected ${faces.length} faces · 30% background context crops evaluated independently</div>
         </div>
         <span class="yolo-badge">${faces.length} Faces Evaluated</span>
@@ -1015,7 +1081,7 @@ function verdictCard(ui, ev) {
         </div>
         <div class="face-reasoning-title-row">
           <span class="reasoning-title-text">Forensic Reasoning — Face #${primaryId}${faces.find(x => x.face_id === primaryId) ? ` (${faces.find(x => x.face_id === primaryId).verdict})` : ''}</span>
-          <span class="reasoning-chars-pill"></span>
+
         </div>
         <details class="think face-think" style="margin:8px 0; display:none;">
           <summary>Deliberation</summary>
@@ -1029,10 +1095,10 @@ function verdictCard(ui, ev) {
       <div class="yolo-banner passthrough">
         <div class="yolo-icon">👤</div>
         <div class="yolo-info">
-          <div class="yolo-title">YOLO Face Detection: Portrait Passthrough Mode</div>
-          <div class="yolo-desc">1 face detected filling ≥ 5% of frame (portrait) → evaluated via validated full-image path</div>
+          <div class="yolo-title">Portrait analysis</div>
+          <div class="yolo-desc">One face detected. The classifier evaluated the full image.</div>
         </div>
-        <span class="yolo-badge" style="background:var(--ok); color:#fff;">Single Portrait</span>
+
       </div>
     `;
   } else if (path === 'no_face') {
@@ -1040,10 +1106,10 @@ function verdictCard(ui, ev) {
       <div class="yolo-banner no-face">
         <div class="yolo-icon">🔍</div>
         <div class="yolo-info">
-          <div class="yolo-title">YOLO Face Detection: No Faces Detected</div>
-          <div class="yolo-desc">No faces detected above the 96px minimum size gate → full-image fallback applied</div>
+          <div class="yolo-title">Full-image analysis</div>
+          <div class="yolo-desc">No face met the detection threshold. The classifier evaluated the full image.</div>
         </div>
-        <span class="yolo-badge" style="background:var(--warn); color:#fff;">0 Faces</span>
+
       </div>
     `;
   }
@@ -1082,14 +1148,9 @@ function verdictCard(ui, ev) {
 
     const canvas = card.querySelector('.faces-canvas');
     const wrap = card.querySelector('.faces-canvas-wrap');
-    let imgUrl = ui.imgUrl;
-    if (!imgUrl) {
-      const imgs = thread.querySelectorAll('.msg.user img');
-      if (imgs.length) imgUrl = imgs[imgs.length - 1].src;
-    }
-
+    const imgUrl = ui.imgUrl;
     const titleEl = card.querySelector('.reasoning-title-text');
-    const charsEl = card.querySelector('.reasoning-chars-pill');
+
     const thinkEl = card.querySelector('.face-think');
     const thinkBodyEl = card.querySelector('.face-think-body');
     const outputEl = card.querySelector('.face-reasoning-output');
@@ -1147,16 +1208,12 @@ function verdictCard(ui, ev) {
       if (titleEl) {
         titleEl.innerHTML = `Forensic Reasoning — Face #${fid} ${fVerd ? `(${esc(fVerd)} ${fConf})` : ''}${isPri ? ' ★ Decisive' : ''}`;
       }
-      if (charsEl) {
-        charsEl.textContent = data.text ? `${data.text.length.toLocaleString()} chars` : '';
-      }
-
       // Deliberation / Thinking
       if (thinkEl && thinkBodyEl) {
         if (data.thinking) {
           thinkEl.style.display = '';
           thinkBodyEl.textContent = data.thinking;
-          thinkEl.querySelector('summary').textContent = `Deliberation (Face #${fid}) · ${data.thinking.length.toLocaleString()} chars`;
+          thinkEl.querySelector('summary').textContent = `Deliberation (Face #${fid})`;
         } else {
           thinkEl.style.display = 'none';
         }
@@ -1172,7 +1229,7 @@ function verdictCard(ui, ev) {
           outputEl.innerHTML = `
             <div class="face-reason-empty">
               <p>No reasoning generated yet for Face #${fid}.</p>
-              <button type="button" class="btn primary" onclick="window._requestFaceReasoning(${fid})">Generate Reasoning for Face #${fid}</button>
+              <button type="button" class="btn primary" data-generate-face="${fid}">Generate Reasoning for Face #${fid}</button>
             </div>
           `;
         }
@@ -1186,7 +1243,7 @@ function verdictCard(ui, ev) {
       if (thinkEl && thinkBodyEl && data.thinking) {
         thinkEl.style.display = '';
         thinkBodyEl.textContent = data.thinking;
-        thinkEl.querySelector('summary').textContent = `Deliberation (Face #${fid}) · ${data.thinking.length.toLocaleString()} chars`;
+        thinkEl.querySelector('summary').textContent = `Deliberation (Face #${fid})`;
         scrollDown();
       }
     };
@@ -1196,7 +1253,6 @@ function verdictCard(ui, ev) {
       const data = ui.faceReasonings[fid] || {};
       if (outputEl && data.text) {
         outputEl.innerHTML = md(data.text);
-        if (charsEl) charsEl.textContent = `${data.text.length.toLocaleString()} chars`;
         scrollDown();
       }
     };
@@ -1221,8 +1277,12 @@ function verdictCard(ui, ev) {
     // Set initial face reasoning view
     ui.selectFace(primaryId);
 
-    // Global on-demand requester for ungenerated faces
-    window._requestFaceReasoning = async function(fid) {
+    // Each card owns its original conversation and image.
+    card.addEventListener('click', event => {
+      const button = event.target.closest('[data-generate-face]');
+      if (button) generateFace(Number(button.dataset.generateFace));
+    });
+    async function generateFace(fid) {
       ui.selectFace(fid);
       if (!ui.faceReasonings[fid]) {
         ui.faceReasonings[fid] = { text: '', thinking: '', done: false, status: 'generating' };
@@ -1238,7 +1298,9 @@ function verdictCard(ui, ev) {
 
       try {
         await sse('/chat/reason_face', {
-          conversation_id: conversationId,
+          conversation_id: ui.chatId || conversationId,
+          image_id: ui.imageId,
+          analysis_id: ui.analysisId,
           face_id: fid,
           image_base64: imgB64,
         }, ev => {
@@ -1270,7 +1332,7 @@ function verdictCard(ui, ev) {
 }
 
 function setBusy(on) {
-  historySelect.disabled = $('newChat').disabled = on;
+  chatList.inert = $('newChat').disabled = on;
   sendBtn.classList.toggle('stop', on);
   sendBtn.textContent = on ? '■' : '↑';
   sendBtn.setAttribute('aria-label', on ? 'Stop generating' : 'Send');
@@ -1303,23 +1365,19 @@ async function ask() {
         case 'done':
           if (ev.saved) rememberChat(ev.conversation_id, message);
           break;
-        case 'image_selection': {
-          const label = document.createElement('div');
-          label.className = 'route';
-          label.textContent = `Using ${ev.image_id} \u00b7 upload ${ev.upload_number} of ${ev.upload_count}`;
-          ui.m.insertBefore(label, ui.bubble);
+        case 'analysis_saved': ui.analysisId = ev.analysis_id; break;
+        case 'image_selection':
+          ui.imageId = ev.image_id; ui.chatId = conversationId;
+          ui.imgUrl = '/chat/history/' + encodeURIComponent(ui.chatId) + '/images/' + encodeURIComponent(ui.imageId);
+          ui.imgB64 = null;
+          showImageSelection(ui, ev.image_id, 'upload ' + ev.upload_number + ' of ' + ev.upload_count);
           break;
-        }
         case 'route':
-          setRoute(ui, ev.task, forced ? 'deep thinking' : 'routed by Laya');
+          setRoute(ui, ev.task);
           ui.ans.textContent = ev.task === 'general' ? 'Thinking…' : `Loading ${TASK_LABEL[ev.task] || ev.task}…`;
           break;
         case 'adapter': {
-          const bits = [];
-          if (ev.cold) bits.push('loaded' + (ev.swap_ms ? ` in ${(ev.swap_ms / 1000).toFixed(1)}s` : ''));
-          else bits.push('already loaded');
-          if (ev.unloaded && ev.unloaded.length) bits.push('swapped out ' + ev.unloaded.join(', '));
-          setRoute(ui, ev.task, bits.join(' · '));
+          setRoute(ui, ev.task);
           if (!started) ui.ans.textContent = 'Thinking…';
           refreshStatus();
           break;
@@ -1399,6 +1457,7 @@ async function ask() {
       const reply = (ui.text || verdictLine).trim();
       if (reply) chatHistory.push({ role: 'assistant', content: reply });
     }
+    if (gotAnswer) copyAction(ui);
     controller = null; setBusy(false); pollStatus(false); box.focus(); scrollDown();
   }
 }
@@ -1796,6 +1855,34 @@ $('qBox').addEventListener('keydown', e => { if (e.key === 'Enter') askIncident(
 $('qChips').querySelectorAll('.chip').forEach(c => c.onclick = () => askIncident(c.dataset.q));
 
 /* ============================== boot ============================== */
+function setChatTheme(theme) {
+  document.body.dataset.chatTheme = theme;
+  $('themeLight').setAttribute('aria-pressed', theme === 'light');
+  $('themeDark').setAttribute('aria-pressed', theme === 'dark');
+  const canvas = $('chatArtwork'), ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Project a twisted ribbon as fine contour lines.
+  for (let j = 0; j < 90; j++) {
+    const v = j / 89 * 2 - 1;
+    ctx.beginPath();
+    for (let i = 0; i <= 320; i++) {
+      const t = i * Math.PI * 2 / 320;
+      const r = 1.03 + .46 * v * Math.cos(3*t);
+      const x = r*Math.cos(t), y = r*Math.sin(t), z = .53*v*Math.sin(3*t) + .22*Math.sin(2*t);
+      const sx = 274 + 158*(.92*x+.28*y), sy = 212 + 154*(.68*y-.32*x+.8*z);
+      if (i) ctx.lineTo(sx,sy); else ctx.moveTo(sx,sy);
+    }
+    ctx.strokeStyle = theme === 'dark' ? 'rgba(242,166,132,.64)' : 'rgba(154,67,43,.62)';
+    ctx.lineWidth = 1.1; ctx.stroke();
+  }
+}
+for (const theme of ['light','dark']) {
+  $(theme === 'light' ? 'themeLight' : 'themeDark').onclick = () => {
+    localStorage.setItem('polyvalent.chat.theme',theme); setChatTheme(theme);
+  };
+}
+setChatTheme(localStorage.getItem('polyvalent.chat.theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
 refreshChatMenu();
 if (localStorage.getItem(activeKey)) openChat(localStorage.getItem(activeKey));
 showView(location.hash.slice(1) || 'chat');
