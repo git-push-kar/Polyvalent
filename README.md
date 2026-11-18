@@ -11,12 +11,13 @@ the previous task used.
 | `reasoning` | Logic puzzles, deductions, "A or B?" decisions | LoRA r=64 on the base |
 | `anomaly` | Tennessee Eastman (TEP) fault root-cause analysis | LoRA r=16 on the base |
 | `deepfake` | Real or fake verdict for a face image, with forensic reasoning | dedicated wrapper (own backbone, LLM + vision LoRA, classifier heads) |
+| `finance` / `internvl3_state_rl` | Nifty 49 Equities Portfolio RL trading & allocation | LoRA on the base (`adapters/internvl3_state_rl`) |
 
 The web UI has three workspaces:
 
 - **Chat**: Laya picks the base model, the reasoning adapter or the deepfake adapter for each message. Every reply shows which one answered and whether it was just loaded.
 - **Anomaly detection**: replays a TEP test-set run, detects the fault, and asks the anomaly adapter for a root-cause report. You can ask follow-up questions about the incident.
-- **Finance portfolio**: coming soon.
+- **Finance portfolio**: interactive multi-mode paper trading environment evaluating 49 Nifty equities with the state-aware InternVL3-2B + LoRA RL adapter. Supports Benchmark Replay (Jan 2025 – Jan 2026), 2026 YTD History Replay, and Live Real-Time Market trading with persistent JSON ledger.
 
 ---
 
@@ -194,7 +195,16 @@ Other settings:
 | `FINAL_ANOMALY_CONFIG` | `<repo>/configs/config.yaml` | config for that detector |
 | `FINAL_ANOMALY_THRESHOLD` | `0.687363` | detector threshold shown in the UI |
 
-## Running
+## One-Command Launch (Recommended)
+
+To launch the complete unified demonstration in a single command:
+
+- **Windows Batch**: Double-click or run `run_demo.bat`
+- **PowerShell**: Run `.\Start-Demo.ps1`
+
+Both scripts automatically detect Python 3.12 (`torch 2.6.0+cu124`, `laya`, `peft`, `fastapi`), launch Uvicorn on `http://127.0.0.1:8000`, and open the demo interface in your default browser.
+
+## Running Manually
 
 ```powershell
 # real models (weights are in models/ and adapters/, no env vars needed)
@@ -242,6 +252,36 @@ Use `--workers 1`. Each worker process would load its own copy of the weights.
 4. **Reasoning.** `POST /anomaly/reason` sends the evidence through **Laya**. The sensor-vector modality routes it to `anomaly`, the anomaly LoRA is loaded if needed, and the adapter streams a JSON root-cause report using the training-time framing (`[ANOMALY INCIDENT TELEMETRY]` block). Follow-up questions use the follow-up system prompt with the same telemetry. The model only ever sees the evidence, never the raw time series.
 5. **Comparison.** Tick "Show dataset fault label" to compare the diagnosis with the run's IDV label.
 
+## Finance portfolio tab
+
+The Finance workspace provides an interactive paper-trading and portfolio management environment evaluated over **49 Nifty equities**, powered by the **state-aware InternVL3-2B + LoRA RL adapter** (`adapters/internvl3_state_rl` or `adapters/finance_policy`).
+
+### Three Distinct Simulation Modes
+
+1. **Mode 1: Final Benchmark Replay (Jan 2025 – Jan 2026)**
+   - Replays 270 historical trading sessions from the primary test set.
+   - Demonstrates +14.53% cumulative return net of fees, outperforming buy-and-hold and untrained references.
+   - Stepping: `▶ Start simulation`, `Next day`, or `Next rebalance` (every 5 trading days).
+
+2. **Mode 2: 2026 YTD History Replay (Jan 1, 2026 – Yesterday)**
+   - Continuous daily trading replay spanning the entire 2026 year-to-date history (216+ trading sessions).
+   - Simulates realistic daily rebalancing and state accumulation up to the most recent historical close.
+
+3. **Mode 3: Live Real-Time Market Trading (Today's Live Session)**
+   - Resumes seamlessly from yesterday's closing portfolio state.
+   - **`🔄 Fetch Live Quotes`**: Queries Yahoo Finance real-time intraday quotes for all 49 Nifty components (falls back gracefully to offline synthetic delta cache if offline).
+   - **`🤖 Run Model Decision`**: Invokes the InternVL3-2B RL specialist with current holdings and live market technicals to produce optimal portfolio target weights.
+   - **`📌 Settle & Close Today`**: Commits the live trading day, records realized P&L and fees, and writes directly to permanent JSON storage (`data/finance_paper/live_portfolio_store.json` + automatic backup).
+   - **`⚡ Step Live Day`**: Executes combined fetch, decision, execution, and step in a single operation.
+
+### JSON Storage Architecture
+
+The live portfolio state is persisted across server restarts in:
+- `data/finance_paper/live_portfolio_store.json`
+- `data/finance_paper/live_portfolio_store.backup.json`
+
+The JSON store tracks cash balance, equity, cumulative fees, per-holding share counts, market values, and a full chronological history of daily settlement records.
+
 ## API
 
 | Method | Path | Purpose |
@@ -254,6 +294,13 @@ Use `--workers 1`. Each worker process would load its own copy of the weights.
 | GET | `/anomaly/scenarios` | available TEP runs |
 | POST | `/anomaly/run` | `{scenario_id}` → detection timeline + events (JSON) |
 | POST | `/anomaly/reason` | `{evidence, values?, question?, history?}` → RCA report or follow-up answer (SSE) |
+| POST | `/finance/paper/sessions` | Create or load simulation session (`mode`: `benchmark`, `ytd`, or `live`) |
+| GET | `/finance/paper/sessions/{id}` | Retrieve current portfolio status, holdings, and metrics |
+| POST | `/finance/paper/sessions/{id}/advance` | Advance session (`mode`: `day` or `rebalance`) |
+| POST | `/finance/paper/sessions/{id}/reset` | Reset simulation account with fresh capital |
+| POST | `/finance/paper/live/refresh` | Mode 3: fetch latest live market quotes |
+| POST | `/finance/paper/live/decide` | Mode 3: run InternVL3-2B model decision & rebalance |
+| POST | `/finance/paper/live/settle` | Mode 3: settle & commit day to `live_portfolio_store.json` |
 | GET | `/route/stats`, `/health` | counters and health |
 
 SSE events (one JSON object per `data:` line):
@@ -274,11 +321,18 @@ done         {"conversation_id"}
 ## Tests
 
 ```powershell
-python -m pytest -q tests          # no weights needed (fake backend + stub mode)
+python -m pytest -q tests
 ```
 
-- `tests/test_residency.py`: lazy loading, one LoRA at a time, backbone swaps, recovery from a failed attach, cross-thread lock release.
-- `tests/test_api_stub.py`: chat task changes swap adapters, a text-only deepfake request does not evict the loaded adapter, the anomaly tab end to end, and disconnect cleanup.
+The comprehensive test suite (75 passed tests) covers:
+- `tests/test_three_simulation_modes.py`: Mode 1 (Benchmark Replay), Mode 2 (2026 YTD History Replay), and Mode 3 (Live Real-Time Market with refresh, decide, and JSON settlement).
+- `tests/test_internvl3_state_rl_simulation.py`: State-aware RL policy evaluation and paper account stateful execution.
+- `tests/test_live_market_simulation.py`: Live market sessions and daily progression.
+- `tests/test_residency.py`: Lazy loading, one LoRA at a time, backbone swaps, recovery from a failed attach, cross-thread lock release.
+- `tests/test_api_stub.py`: Chat task changes swap adapters, text-only deepfake does not evict loaded adapter, anomaly tab end to end, disconnect cleanup.
+- `tests/test_anomaly_classification.py`: TEP anomaly classification and diagnosis hybrid.
+- `tests/test_multiface_pipeline.py`: YOLO face detection and bounding box pipeline.
+- `tests/test_router_cases.py`: LAYA router decision rules and residency interactions.
 
 Live-model regression scripts are in `scripts/`. For example,
 `scripts/verify_chat_routing.py` and `scripts/verify_deepfake_live.py` load the
@@ -292,7 +346,14 @@ routing/context/adapter receipts.
 ## Repository layout
 
 ```
+run_demo.bat             One-command Windows launcher for the unified demo
+Start-Demo.ps1           PowerShell launcher for the unified demo
 api/server.py            FastAPI app, SSE endpoints, lease handling
+api/finance.py           Finance endpoints (overview, benchmark, quotes)
+api/paper.py             Finance Paper Trading endpoints (3 modes, live settle)
+finance/                 Finance RL engine, state policy, live market service
+finance/live_manager.py  3 simulation modes manager & JSON portfolio persistence
+finance/paper_engine.py  Historical benchmark simulator & multi-asset accounting
 router/trained_router.py fine-tuned BASE/DEEPFAKE chat router (five-field state)
 router/conversations.py  server-side turns, image assets, saved analyses
 router/laya_router.py    four-way Laya router (anomaly + research endpoints)
@@ -304,9 +365,12 @@ tep_sim/                 TEP metadata, dataset loading, detector, evidence → p
 models/InternVL3-2B/     pristine shared base weights (local copy, git-ignored)
 adapters/                task LoRAs + deepfake heads (local copies, git-ignored)
 ui/index.html            single-page UI (Chat · Anomaly detection · Finance)
+ui/finance.js            Finance workspace controller (3 modes + live controls)
+ui/finance.css           Finance workspace styling
+data/finance_paper/      Live portfolio store JSON, backups & market cache
 scripts/                 live-model probes and dataset preparation
 guides/                  integration guide and research report drafts
-tests/                   pytest suite (runs without GPU or weights)
+tests/                   pytest suite (75 regression & integration tests)
 ```
 
 ## Troubleshooting

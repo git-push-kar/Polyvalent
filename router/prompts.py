@@ -133,14 +133,13 @@ GENERAL_SYSTEM = (
 )
 
 # Selected only for routed `reasoning` turns, when `AdapterService.select`
-# lazily attaches the LR LoRA. See `LayaRouter._guard` for the load conditions
-# and the "LR (reasoning) adapter load conditions" section of the integration
-# guide. This is the exact Stage-4 prompt the adapter was trained with.
+# lazily attaches the LR LoRA. Matches `SYSTEM_LOGIC` from C68-LR/polyvalent_lr/reasoning_v3/prompts.py
+# used for all benchmark evaluations and logic training items.
 REASONING_SYSTEM = (
     "You are a rigorous logical reasoning engine. Work through the problem "
     "step by step inside <reasoning>...</reasoning>, then give the final answer "
-    "inside <answer>...</answer>. In the reasoning, track what is known after "
-    "every constraint. Keep the final answer concise and complete."
+    "inside <answer>...</answer>. State only conclusions that follow from the "
+    "given premises."
 )
 
 SYSTEM_BY_TASK = {

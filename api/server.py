@@ -54,8 +54,18 @@ from router.prompts import clean_adapter_directive
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="Polyvalent Laya Service", version="0.3.0")
+from api.finance import router as finance_router
+app.include_router(finance_router)
+from api.paper import router as paper_router
+app.include_router(paper_router)
 
 _REPO = Path(__file__).resolve().parent.parent
+
+@app.get('/ui/finance.html', include_in_schema=False)
+@app.get('/ui/paper.html', include_in_schema=False)
+def retired_finance_page():
+    return RedirectResponse('/#finance')
+
 app.mount("/ui", StaticFiles(directory=str(_REPO / "ui"), html=True),
           name="ui")
 
@@ -82,6 +92,9 @@ TASK_LABELS = {
     "reasoning": "Logical-reasoning adapter",
     "deepfake": "Deepfake forensics adapter",
     "anomaly": "TEP anomaly adapter",
+    "finance": "Finance explanation adapter",
+    "finance_policy": "Nifty trading adapter",
+    "internvl3_state_rl": "InternVL3 State RL adapter",
 }
 
 
@@ -143,7 +156,7 @@ def _weights(env: str, local: Path) -> str:
 
 
 def get_service() -> AdapterService:
-    """One service, one pristine base, three task adapters (lazy).
+    """One service, one pristine base, task adapters loaded on demand.
 
     Defaults are the in-repo copies above; FINAL_* variables still override
     them when they point at weights that exist. Nothing is loaded here: each
@@ -155,6 +168,7 @@ def get_service() -> AdapterService:
             base_dir=_weights("FINAL_BASE_DIR", _PRISTINE_BASE),
             anomaly_dir=_weights("FINAL_ANOMALY_DIR", _ANOMALY_DIR),
             reasoning_dir=_weights("FINAL_REASONING_DIR", _REASONING_DIR),
+            finance_dir=_weights("FINAL_FINANCE_DIR", _REPO / "adapters" / "finance_explanation"),
             deepfake_llm_dir=_weights("FINAL_DEEPFAKE_LLM_DIR",
                                       _DEEPFAKE_ADAPTERS / "llm_adapter"),
             deepfake_vision_dir=_weights("FINAL_DEEPFAKE_VISION_DIR",
@@ -657,6 +671,7 @@ def _chat_stream(req: ChatRequest):
             if task == "deepfake":
                 verdict: Dict[str, Any] = {}
                 visible: List[str] = []
+                per_face_explanations: Dict[int, str] = {}
                 for chunk in service.analyze_image_stream(
                         target_asset.data,
                         max_new_tokens=req.max_new_tokens,
@@ -668,18 +683,29 @@ def _chat_stream(req: ChatRequest):
                         verdict = {**chunk, "image_id": target_asset.id}
                         log_record["verdict"] = verdict
                         yield _sse(verdict)
-                    elif kind in ("thinking", "token", "notice"):
-                        if kind != "notice":
+                    elif kind in ("thinking", "token", "notice", "face_start", "face_done"):
+                        if kind == "token" and chunk.get("is_primary", True):
                             visible.append(chunk.get("text", ""))
-                        yield _sse({"event": kind,
-                                    "text": chunk.get("text", "")})
+                        if kind == "face_done":
+                            f_id = chunk.get("face_id")
+                            if f_id is not None:
+                                per_face_explanations[f_id] = chunk.get("text", "")
+                        yield _sse(chunk)
                     elif kind == "generation_receipt":
                         gen["generation"] = chunk
+                        yield _sse(chunk)
                 if not verdict.get("verdict"):
                     yield _sse({"event": "notice", "text": f"No verdict was produced for {target_asset.id}."})
                     yield _sse({"event": "done", "conversation_id": conversation_id})
                     return
                 explanation = "".join(visible).strip()
+                faces_data = []
+                for f in verdict.get("faces", []):
+                    f_dict = dict(f)
+                    f_id = f_dict.get("face_id")
+                    if f_id in per_face_explanations:
+                        f_dict["reasoning"] = per_face_explanations[f_id]
+                    faces_data.append(f_dict)
                 result = Analysis(
                     id=f"an_{len(conv.analyses) + 1}",
                     image_id=target_asset.id,
@@ -692,7 +718,7 @@ def _chat_stream(req: ChatRequest):
                     faces_detected=int(verdict.get("faces_detected", 1)),
                     faces_analyzed=int(verdict.get("faces_analyzed", 1)),
                     routing_path=str(verdict.get("routing_path", "passthrough")),
-                    faces=list(verdict.get("faces", [])),
+                    faces=faces_data,
                 )
                 store.record_analysis(conversation_id, result)
                 answer_parts.append(result.history_text())
@@ -754,6 +780,49 @@ def _chat_stream(req: ChatRequest):
 @app.post("/chat/stream")
 def chat_stream(req: ChatRequest):
     return _sse_response(_chat_stream(req))
+
+
+class FaceReasonRequest(BaseModel):
+    conversation_id: Optional[str] = None
+    face_id: int
+    image_base64: Optional[str] = None
+    max_new_tokens: int = 512
+
+
+def _reason_face_stream(req: FaceReasonRequest):
+    service = get_service()
+    store = get_conversations()
+    raw_bytes = None
+    if req.image_base64:
+        try:
+            raw_bytes = base64.b64decode(req.image_base64)
+        except Exception:
+            raw_bytes = None
+    elif req.conversation_id:
+        conv = store.get(req.conversation_id)
+        asset = conv.usable_asset() if conv else None
+        if asset:
+            raw_bytes = asset.data
+    if not raw_bytes:
+        yield _sse({"event": "notice", "text": "Image data not found."})
+        yield _sse({"event": "done"})
+        return
+
+    try:
+        with service.lease("deepfake"):
+            for chunk in service.reason_single_face_stream(
+                    raw_bytes, face_id=req.face_id, max_new_tokens=req.max_new_tokens):
+                yield _sse(chunk)
+        yield _sse({"event": "done"})
+    except Exception as exc:
+        logger.exception("reason_single_face failed for face %s", req.face_id)
+        yield _sse({"event": "notice", "text": f"Could not generate reasoning: {exc}"})
+        yield _sse({"event": "done"})
+
+
+@app.post("/chat/reason_face")
+def chat_reason_face(req: FaceReasonRequest):
+    return _sse_response(_reason_face_stream(req))
 
 
 # ---------------------------------------------------------------------

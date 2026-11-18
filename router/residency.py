@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-LORA_TASKS = ("anomaly", "reasoning")
+LORA_TASKS = ("anomaly", "reasoning", "finance", "finance_policy", "internvl3_state_rl")
 POLICIES = ("swap", "keep")
 
 

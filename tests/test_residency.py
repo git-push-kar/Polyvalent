@@ -101,7 +101,18 @@ def test_failed_attach_drops_base_and_recovers():
 def test_unknown_task_rejected():
     _, r = make()
     with pytest.raises(ValueError):
-        r.activate("finance")
+        r.activate("unknown_domain")
+
+
+def test_finance_uses_same_base_and_releases_previous_adapter():
+    fb, r = make()
+    r.activate('reasoning')
+    change = r.activate('finance')
+    assert change.unloaded == ['reasoning']
+    assert change.loaded == ['finance']
+    assert r.base == 'BASE' and r.lora == 'finance'
+    bare = r.activate('general')
+    assert bare.unloaded == ['finance'] and r.lora is None
 
 
 def test_lock_can_be_released_from_another_thread():

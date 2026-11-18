@@ -1,0 +1,19 @@
+{
+  "label": "Nifty state-aware trading adapter",
+  "role": "State-Aware Reinforcement Learning policy managing all 49 Nifty equities with whole-share integer execution and natural-language rationales",
+  "adapter_path": "adapters/internvl3_state_rl",
+  "selection": {
+    "model": "InternVL3-2B",
+    "method": "Policy Gradient RL on whole-share market",
+    "training": "2018-07-02 to 2022-12-31",
+    "validation": "2023-01-01 to 2024-12-31",
+    "test_net_return": "14.53%",
+    "test_sharpe": "1.121",
+    "test_max_drawdown": "8.87%",
+    "benchmark_buy_and_hold": "12.56%",
+    "benchmark_untrained_llm": "13.73%"
+  },
+  "weights_sha256": "749d98f2420b5ce601b10d1b191dbb2d9985ecac5ce9f290b55defa588c1d340",
+  "text_dtype": "bfloat16",
+  "explanations_enabled": true
+}

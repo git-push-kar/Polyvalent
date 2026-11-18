@@ -19,6 +19,7 @@ import threading
 import time
 import traceback
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Dict, Generator, Optional
 
 from router.latency import GenerationReceipt, TokenStat
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 _ANOMALY = "anomaly"
 _REASONING = "reasoning"
+_FINANCE = "finance"
 _DEEPFAKE_LLM = "deepfake_llm"
 _DEEPFAKE_VISION = "deepfake_vision"
 
@@ -210,13 +212,15 @@ class AdapterService:
                  deepfake_llm_dir: str,
                  deepfake_vision_dir: str,
                  custom_heads_path: Optional[str] = None,
-                 policy: Optional[str] = None) -> None:
+                 policy: Optional[str] = None,
+                 finance_dir: Optional[str] = None) -> None:
         # All adapters target the SAME pristine InternVL3-2B base.
         #   anomaly / reasoning -> LoRA on the shared base, one at a time
         #   deepfake            -> dedicated wrapper (own backbone + heads)
         self.base_dir = base_dir
         self.anomaly_dir = anomaly_dir
         self.reasoning_dir = reasoning_dir
+        self.finance_dir = finance_dir
         self.deepfake_llm_dir = deepfake_llm_dir
         self.deepfake_vision_dir = deepfake_vision_dir
         self.custom_heads_path = custom_heads_path
@@ -251,7 +255,17 @@ class AdapterService:
         )
 
     def _lora_dir(self, task: str) -> str:
-        return {_ANOMALY: self.anomaly_dir, _REASONING: self.reasoning_dir}[task]
+        repo_root = Path(__file__).resolve().parent.parent
+        path = {
+            _ANOMALY: self.anomaly_dir,
+            _REASONING: self.reasoning_dir,
+            _FINANCE: self.finance_dir or os.getenv("FINAL_FINANCE_DIR", str(repo_root / "adapters" / "finance_explanation")),
+            "finance_policy": os.getenv("FINAL_FINANCE_POLICY_DIR", str(repo_root / "adapters" / "finance_policy" / "finance_lora" / "finance")),
+            "internvl3_state_rl": str(repo_root / "adapters" / "internvl3_state_rl"),
+        }.get(task)
+        if not path:
+            raise RuntimeError(f"No model adapter configured for {task}")
+        return path
 
     def _ensure_tokenizer(self):
         if self._tokenizer is None:
@@ -285,6 +299,15 @@ class AdapterService:
         import warnings
         from peft import PeftModel
 
+        if task in ("finance_policy", "internvl3_state_rl") or (task == _FINANCE and os.getenv("FINAL_FINANCE_TEXT_DTYPE") == "fp32"):
+            import torch
+            base._finance_restore_dtype = next(base.language_model.parameters()).dtype
+            base._finance_restore_vision_device = next(base.vision_model.parameters()).device
+            base.vision_model.cpu()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            base.language_model.float()
+
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             model = PeftModel.from_pretrained(
@@ -298,6 +321,11 @@ class AdapterService:
     def _detach_lora(model):
         """Remove LoRA layers WITHOUT merging: the base stays pristine."""
         base = model.unload()
+        if hasattr(base, "_finance_restore_dtype"):
+            base.language_model.to(dtype=base._finance_restore_dtype)
+            base.vision_model.to(base._finance_restore_vision_device)
+            del base._finance_restore_dtype
+            del base._finance_restore_vision_device
         for attr in ("peft_config", "_hf_peft_config_loaded"):
             if hasattr(base, attr):
                 try:
@@ -332,6 +360,9 @@ class AdapterService:
     def adapter_names(task: str) -> list:
         return {"anomaly": [_ANOMALY],
                 "reasoning": [_REASONING],
+                "finance": [_FINANCE],
+                "finance_policy": ["Nifty trading adapter"],
+                "internvl3_state_rl": ["InternVL3 State RL adapter"],
                 "deepfake": [_DEEPFAKE_LLM, _DEEPFAKE_VISION, "custom_heads"],
                 "general": ["base"]}.get(task, [])
 
@@ -502,11 +533,48 @@ class AdapterService:
             ]
         yield verdict_event
 
-        prompt_text = build_telemetry_prompt(winner["telemetry"])
+        # Multi-face reasoning: if per_face with multiple faces, generate reasoning for ALL faces!
+        # Winner (decisive face) is generated first so immediate feedback is preserved.
+        if routing_path == "per_face" and len(classified_items) > 1:
+            other_faces = [it for it in classified_items if it["id"] != winner["id"]]
+            targets = [winner] + sorted(other_faces, key=lambda x: x["id"])
+        else:
+            targets = [winner]
 
-        # Reasoning generation with token streaming for the decisive face crop (or full image in passthrough).
+        for target in targets:
+            f_id = target.get("id", 1)
+            is_pri = (f_id == winner["id"])
+            yield {
+                "event": "face_start",
+                "face_id": f_id,
+                "verdict": target["verdict"],
+                "confidence": round(target["confidence"], 4),
+                "is_primary": is_pri,
+            }
+            yield from self._stream_item_reasoning(
+                wrapper=wrapper,
+                tokenizer=tokenizer,
+                device=device,
+                it=target,
+                is_primary=is_pri,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+            )
+
+    def _stream_item_reasoning(self, wrapper, tokenizer, device, it: Dict[str, Any],
+                               is_primary: bool, max_new_tokens: int = 512,
+                               temperature: float = 0.0,
+                               repetition_penalty: float = 1.05) -> Generator[Dict[str, Any], None, None]:
+        import torch
+        from transformers import TextIteratorStreamer
+        from deepfake.forensics import build_telemetry_prompt
+
+        f_id = it.get("id", 1)
+        prompt_text = build_telemetry_prompt(it["telemetry"])
+
         with torch.no_grad():
-            vis_tokens = wrapper._get_native_visual_tokens(winner["pv"])
+            vis_tokens = wrapper._get_native_visual_tokens(it["pv"])
         inputs_embeds = vis_tokens.to(torch.bfloat16)
         prompt_ids = tokenizer(prompt_text, return_tensors="pt",
                                add_special_tokens=False).input_ids.to(device)
@@ -561,41 +629,131 @@ class AdapterService:
                 for channel, text in sectioner.feed(chunk):
                     if channel != "thinking":
                         visible.append(text)
-                    yield {"event": "thinking" if channel == "thinking" else "token",
+                    ev_type = "thinking" if channel == "thinking" else "token"
+                    yield {"event": ev_type,
+                           "face_id": f_id,
+                           "is_primary": is_primary,
                            "index": idx, "text": text,
                            "latency_ms": round(dt, 3),
                            "elapsed_ms": round((now - t0) * 1000.0, 3)}
         finally:
-            # Client gone or stream done: stop generate() before the lease
-            # is released, so no swap can happen under a live decode.
             cancel.set()
             thread.join(timeout=60)
         elapsed = round((time.perf_counter() - t0) * 1000.0, 3)
-        for channel, text in sectioner.flush():  # release any partial-tag carry
+        for channel, text in sectioner.flush():
             if channel != "thinking":
                 visible.append(text)
-            yield {"event": "thinking" if channel == "thinking" else "token",
+            ev_type = "thinking" if channel == "thinking" else "token"
+            yield {"event": ev_type,
+                   "face_id": f_id,
+                   "is_primary": is_primary,
                    "index": idx, "text": text, "latency_ms": 0.0,
                    "elapsed_ms": elapsed}
-        # If the run stopped before <conclusion>/<answer> (budget/stop),
-        # surface the deliberation so the client never shows an empty reply.
         if not "".join(visible).strip():
             fallback = ("".join(sectioner.conclusion_text) or
                         "".join(sectioner.thinking_text)).strip()
             if fallback:
-                yield {"event": "token", "index": idx, "text": fallback,
+                yield {"event": "token", "face_id": f_id, "is_primary": is_primary,
+                       "index": idx, "text": fallback,
                        "latency_ms": 0.0, "elapsed_ms": elapsed}
         if gen_kwargs.get("_worker_error"):
             yield {"event": "notice",
-                   "text": "Reasoning hit an error partway; verdict above stands. "
+                   "text": f"Reasoning for Face #{f_id} hit an error partway; verdict above stands. "
                            f"Detail: {gen_kwargs['_worker_error'][:200]}"}
+
+        full_visible = "".join(visible).strip()
+        full_thinking = "".join(sectioner.thinking_text).strip()
+        yield {
+            "event": "face_done",
+            "face_id": f_id,
+            "verdict": it.get("verdict"),
+            "confidence": round(it.get("confidence", 0.0), 4),
+            "text": full_visible,
+            "thinking": full_thinking,
+            "is_primary": is_primary,
+        }
+
         total = (time.perf_counter() - t0) * 1000.0
         decode_ms = max(total - prefill_ms, 0.0)
-        yield {"event": "generation_receipt",
+        yield {"event": "generation_receipt", "face_id": f_id,
                **GenerationReceipt(prefill_ms=prefill_ms, decode_ms=decode_ms,
                                    tokens=idx,
                                    tok_per_s=idx / max(decode_ms / 1000.0, 1e-9),
                                    per_token_ms=per_token).to_dict()}
+
+    def reason_single_face_stream(self, image_bytes: bytes, face_id: int,
+                                  max_new_tokens: int = 512,
+                                  temperature: float = 0.0,
+                                  repetition_penalty: float = 1.05) -> Generator[Dict[str, Any], None, None]:
+        """On-demand reasoning generator for an individual detected face crop."""
+        import io as _io
+        import torch
+        from PIL import Image as _Image
+        from deepfake.face_detect import route_image
+        from deepfake.forensics import extract_forensic_telemetry, preprocess_image
+
+        if self.residency.deepfake is None:
+            raise RuntimeError("deepfake wrapper not resident; call select('deepfake') first")
+        wrapper, tokenizer = self.residency.deepfake
+        device = next(wrapper.parameters()).device
+        img = _Image.open(_io.BytesIO(image_bytes)).convert("RGB")
+        detector = self._ensure_face_detector()
+        route = route_image(img, detector)
+        items = route["items"]
+
+        matched = None
+        for it in items:
+            if it.get("id") == face_id:
+                matched = it
+                break
+        if matched is None and items:
+            matched = items[0]
+
+        if matched is None:
+            yield {"event": "notice", "text": f"Face #{face_id} could not be located in the image."}
+            return
+
+        it_pv, it_freq = preprocess_image(matched["image"], device=str(device))
+        _dt = wrapper.cls_head.net[0].weight.dtype
+        with torch.no_grad():
+            cls_token, pooled, _patches, attn_w = wrapper._get_vision_features(it_pv, return_attn_weights=True)
+            freq_emb = wrapper.freq_branch(it_freq.to(device))
+            vis_cat = torch.cat([cls_token.to(_dt), pooled.to(_dt), freq_emb.to(_dt)], dim=-1)
+            logits = wrapper.cls_head(vis_cat)
+            probs = torch.softmax(logits.float(), dim=-1)
+            p_fake = float(probs[0, 1].item())
+            conf = float(probs[0].max().item())
+            pred = 1 if p_fake >= 0.50 else 0
+            telemetry = extract_forensic_telemetry(pred, conf, it_freq, attn_w)
+
+        target = {
+            **matched,
+            "pv": it_pv,
+            "freq": it_freq,
+            "p_fake": p_fake,
+            "confidence": conf,
+            "pred": pred,
+            "verdict": "FAKE" if pred == 1 else "REAL",
+            "telemetry": telemetry,
+        }
+
+        yield {
+            "event": "face_start",
+            "face_id": face_id,
+            "verdict": target["verdict"],
+            "confidence": round(target["confidence"], 4),
+            "is_primary": False,
+        }
+        yield from self._stream_item_reasoning(
+            wrapper=wrapper,
+            tokenizer=tokenizer,
+            device=device,
+            it=target,
+            is_primary=False,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            repetition_penalty=repetition_penalty,
+        )
 
     @staticmethod
     def _generate_guarded(generate_fn, gen_kwargs: Dict[str, Any],
