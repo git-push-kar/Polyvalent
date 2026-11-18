@@ -288,7 +288,11 @@ def telemetry_block(ev: Dict[str, Any], for_report: bool = True) -> str:
             f"observed {_num(s.get('current_value'))} vs baseline "
             f"{_num(s.get('baseline_value'))} ({dev_s}{extra}, "
             f"trend: {s.get('trend', 'unknown')})")
-    seq = (ev.get("temporal_sequence") or {}).get("sequence") or []
+    # The builtin detector wraps the list as {"sequence": [...], ...}; the
+    # trained pipeline (C68-Anomaly/anomaly) emits the bare list.
+    seq_field = ev.get("temporal_sequence")
+    seq = (seq_field.get("sequence") if isinstance(seq_field, dict)
+           else seq_field) or []
     if seq:
         lines.append("Onset Sequence:")
         for k, s in enumerate(seq, 1):
