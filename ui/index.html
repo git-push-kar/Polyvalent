@@ -618,6 +618,13 @@ async function ask() {
     if (img) body.image_base64 = img.b64;
     await sse('/chat/stream', body, ev => {
       switch (ev.event) {
+        case 'image_selection': {
+          const label = document.createElement('div');
+          label.className = 'route';
+          label.textContent = `Using ${ev.image_id} \u00b7 upload ${ev.upload_number} of ${ev.upload_count}`;
+          ui.m.insertBefore(label, ui.bubble);
+          break;
+        }
         case 'route':
           setRoute(ui, ev.task, forced ? 'deep thinking' : 'routed by Laya');
           ui.ans.textContent = ev.task === 'general' ? 'Thinking…' : `Loading ${TASK_LABEL[ev.task] || ev.task}…`;

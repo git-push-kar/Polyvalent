@@ -61,6 +61,17 @@ _IMAGE_REFERENCE = re.compile(
 )
 
 
+_UPLOAD_NOUN = r"(?:image|photo(?:graph)?|picture|portrait|selfie|screenshot|upload)"
+_ORDINALS = "first second third fourth fifth sixth seventh eighth ninth tenth".split()
+_ORDINAL_REF = re.compile(
+    rf"\b({'|'.join(_ORDINALS)}|\d+(?:st|nd|rd|th))\s+(?:(usable|valid|readable)\s+)?{_UPLOAD_NOUN}\b", re.I)
+_RELATIVE_REF = re.compile(
+    rf"\b(previous|preceding|next|other|last|latest|original)\s+{_UPLOAD_NOUN}\b"
+    rf"|\b{_UPLOAD_NOUN}\s+(previous to|before|after)\s+(?:this|that|the current)\b", re.I)
+_VISUAL_REQUEST = re.compile(
+    r"^\s*(?:how\s+(?:many|mnay)\s+(?:people|persons|faces)(?:\s+(?:are\s+)?(?:there|visible|pictured))?"
+    r"|(?:describe|show)\s+(?:me\s+)?(?:the\s+)?background)[?!. ]*$", re.I)
+
 _IMAGE_ID = re.compile(r"\bimg_\d+\b", re.I)
 _IMAGE_IDENTITY = re.compile(
     r"\b(?:which|what)\s+(?:image|photo|picture)\s+(?:are we|were we|is this|was that|did you|was analyzed)", re.I
@@ -73,16 +84,15 @@ _AUTH_REQUEST = re.compile(
 )
 
 
-def referenced_image_id(message: str) -> Optional[str]:
-    match = _IMAGE_ID.search(message)
-    return match.group().lower() if match else None
+def expects_image(message: str) -> bool:
+    return bool(_IMAGE_REFERENCE.search(message) or _VISUAL_REQUEST.search(message))
 
 
 def image_status_reply(message: str, asset: Optional["Asset"], *, explicitly_selected: bool) -> Optional[str]:
     identity = _IMAGE_IDENTITY.search(message)
     if asset is None:
         return "There is no active image in this conversation." if identity else None
-    if not asset.usable and (explicitly_selected or identity or _IMAGE_REFERENCE.search(message)
+    if not asset.usable and (explicitly_selected or identity or expects_image(message)
             or _CONTINUATION.fullmatch(message.strip()) or
             re.search(r"\b(?:authenticity|authentic|fake|real|deepfake|verdict|image|photo|picture)\b", message, re.I)):
         return (f"{asset.id} could not be analyzed ({asset.detail}). "
@@ -214,6 +224,7 @@ class Conversation:
         self.active_image_id: Optional[str] = None
         self.analyses: List[Analysis] = []
         self._asset_seq = 0
+        self.upload_ids: List[str] = []
 
     # -- assets ---------------------------------------------------------
     def routing_message(self, message: str, asset: Optional[Asset]) -> str:
@@ -234,6 +245,47 @@ class Conversation:
             return (f"The selected image is {asset.id}. Its recorded verdict is "
                     f"{result.verdict} ({result.confidence:.1%} confidence).")
         return f"The selected image is {asset.id}. It has no recorded forensic verdict."
+
+    def selection_event(self, image_id: str) -> Dict[str, Any]:
+        return {"event": "image_selection", "image_id": image_id,
+                "upload_number": self.upload_ids.index(image_id) + 1,
+                "upload_count": len(self.upload_ids)}
+
+    def resolve_image(self, message: str) -> tuple[Optional[str], Optional[str]]:
+        """Resolve one turn against upload order. Selecting an image never reorders it."""
+        named = list(dict.fromkeys(m.group().lower() for m in _IMAGE_ID.finditer(message)))
+        if len(named) > 1:
+            return None, "Please select one image for this question: " + ", ".join(named) + "."
+        if named:
+            return named[0], None
+        ordinal = _ORDINAL_REF.search(message)
+        relative = _RELATIVE_REF.search(message)
+        ids = self.upload_ids
+        if ordinal:
+            word, usable = ordinal.groups()
+            word = word.lower()
+            index = _ORDINALS.index(word) if word in _ORDINALS else int(word[:-2]) - 1
+            candidates = [i for i in ids if self.assets[i].usable] if usable else ids
+            if 0 <= index < len(candidates):
+                return candidates[index], None
+            return None, f"There is no {ordinal.group()} in this chat."
+        if relative:
+            term = (relative[1] or relative[2]).lower()
+            if ids and term in ("last", "latest", "original"):
+                return ids[0 if term == "original" else -1], None
+            if term == "other":
+                others = [i for i in ids if i != self.active_image_id]
+                if len(others) == 1:
+                    return others[0], None
+                if others:
+                    return None, "Which image do you mean? Choose " + " or ".join(others) + "."
+            elif self.active_image_id in ids:
+                offset = 1 if term in ("after", "next") else -1
+                index = ids.index(self.active_image_id) + offset
+                if 0 <= index < len(ids):
+                    return ids[index], None
+            return None, "There is no matching upload in that direction. Please specify an image ID."
+        return None, None
 
     def next_asset_id(self) -> str:
         while True:
@@ -375,6 +427,8 @@ class ConversationStore:
             if not asset.usable:
                 asset.data = b""
             conv.assets[asset.id] = asset
+            if asset.id not in conv.upload_ids:
+                conv.upload_ids.append(asset.id)
             if conv.active_image_id is None or asset.usable:
                 conv.active_image_id = asset.id
             conv.updated_at = time.time()
@@ -416,7 +470,7 @@ class ConversationStore:
             recent = None
             if attached_asset is None:
                 recent = conv.usable_asset()
-                if recent and not _IMAGE_REFERENCE.search(message or ""):
+                if recent and not expects_image(message or ""):
                     if len(conv.turns) - recent.added_turn > RECENT_IMAGE_TURNS:
                         recent = None
             target_asset = attached_asset if (attached_now and attached_asset) else recent

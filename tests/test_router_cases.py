@@ -372,3 +372,61 @@ def test_two_images_keep_verdicts_and_upload_errors_separate(monkeypatch):
     ctx = store.generation_context(conv_id, image_id="img_3")
     assert not ctx["analysis_block"]
     assert all("Deepfake analysis of" not in row["content"] for row in ctx["history"])
+
+
+def test_upload_order_selects_actual_generation_bytes(monkeypatch):
+    conv_id = "ordinal-image-routing"
+    calls = []
+
+    def capture(task, history, message, image_bytes, **kwargs):
+        calls.append(image_bytes)
+        yield {"event": "token", "text": "Image received."}
+
+    monkeypatch.setattr(srv.get_service(), "stream_image_answer", capture)
+    def turn(message, **kwargs):
+        events = chat_stream(message, conversation_id=conv_id, **kwargs)
+        assert events[-1]["event"] == "done"
+        return {ev["event"]: ev for ev in events}
+
+    def png(color):
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 32), color).save(buf, format="PNG")
+        return buf.getvalue()
+
+    import router.conversations as conversations
+    group, portrait = png("red"), png("blue")
+    with monkeypatch.context() as limit:
+        limit.setattr(conversations, "MAX_IMAGE_BYTES", 10)
+        assert "notice" in turn("Count people", image_base64=base64.b64encode(group).decode())
+    for pixels in (group, portrait):
+        turn("Describe this image", image_base64=base64.b64encode(pixels).decode())
+
+    for prompt, expected, pixels in (
+        ("the image previous to this one, describe that image", 2, group),
+        ("how mnay people in img_3", 3, portrait),
+        ("how mnay people in the second image", 2, group),
+        ("describe the first usable image", 2, group),
+        ("describe the next image", 3, portrait),
+    ):
+        before = len(calls)
+        result = turn(prompt)
+        assert result["image_selection"] == {"event": "image_selection",
+            "image_id": f"img_{expected}", "upload_number": expected, "upload_count": 3}
+        assert result["context"]["image_id"] == f"img_{expected}"
+        assert calls[before:] == [pixels]
+
+    before = len(calls)
+    ambiguous = turn("describe the other image")
+    assert "Which image" in ambiguous["notice"]["text"]
+    assert "adapter" not in ambiguous
+    rejected = turn("how many people in first image")
+    assert rejected["image_selection"]["image_id"] == "img_1"
+    assert "exceeds" in rejected["notice"]["text"]
+    assert "adapter" not in rejected
+    assert len(calls) == before
+
+
+def test_population_question_does_not_require_an_upload():
+    from router.conversations import expects_image
+    assert not expects_image("How many people live in France?")
+    assert expects_image("How many people are visible?")

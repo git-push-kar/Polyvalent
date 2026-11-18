@@ -49,7 +49,7 @@ from pydantic import BaseModel, Field
 from router import AdapterService, LayaRouter, TrainedLayaRouter
 from router.adapter_service import BusyError, TagSectioner, TagStripper
 from router.base import RouterDecision
-from router.conversations import Analysis, ConversationStore, image_status_reply, referenced_image_id
+from router.conversations import Analysis, ConversationStore, image_status_reply, expects_image
 from router.prompts import clean_adapter_directive
 
 logger = logging.getLogger(__name__)
@@ -511,7 +511,6 @@ def _chat_stream(req: ChatRequest):
     attached_asset = None
     attached_now = False
 
-    named_id = referenced_image_id(req.message)
     if req.image_base64 is not None:
         try:
             raw = base64.b64decode(req.image_base64)
@@ -523,8 +522,15 @@ def _chat_stream(req: ChatRequest):
                                          media_type=req.media_type or "")
         attached_now = True
         store.set_active_image(conversation_id, attached_asset.id)
-    elif req.image_ids or req.active_image_id or named_id:
-        wanted = req.active_image_id or (req.image_ids[0] if req.image_ids else named_id)
+    # Resolve relative to the newly uploaded image, or to the current selection.
+    named_id, reference_error = conv.resolve_image(req.message)
+    request_id = req.active_image_id or (req.image_ids[0] if req.image_ids else None)
+    if reference_error and not request_id:
+        yield _sse({"event": "notice", "text": reference_error})
+        yield _sse({"event": "done", "conversation_id": conversation_id})
+        return
+    wanted = named_id if attached_asset else request_id or named_id
+    if wanted and (not attached_asset or wanted != attached_asset.id):
         store.set_active_image(conversation_id, wanted)
         attached_asset = conv.assets.get(wanted)
         attached_now = bool(attached_asset and attached_asset.usable)
@@ -537,8 +543,13 @@ def _chat_stream(req: ChatRequest):
     reply = image_status_reply(req.message, selected, explicitly_selected=attached_asset is not None)
     rejected = reply is not None and selected is not None and not selected.usable
     reply = reply or conv.identity_reply(req.message, selected)
+    if not selected and expects_image(req.message) and not reply:
+        reply = "Please upload an image or specify the image ID to use."
+        rejected = True
     if reply:
         image_id = selected.id if selected else None
+        if image_id in conv.upload_ids:
+            yield _sse(conv.selection_event(image_id))
         store.add_turn(conversation_id, "user", req.message, image_id=image_id)
         store.add_turn(conversation_id, "assistant", reply, image_id=image_id)
         yield _sse({"event": "notice" if rejected else "token", "text": reply,
@@ -554,6 +565,8 @@ def _chat_stream(req: ChatRequest):
         conversation_id, req.message, attached_asset=attached_asset,
         attached_now=attached_now)
     target_asset = attached_asset or conv.assets.get(state["active_image_id"])
+    if target_asset and target_asset.id in conv.upload_ids:
+        yield _sse(conv.selection_event(target_asset.id))
     state["message"] = conv.routing_message(req.message, target_asset)
     if req.deep_thinking:
         decision = RouterDecision(
