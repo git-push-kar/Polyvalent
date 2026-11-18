@@ -3,7 +3,7 @@
 Two detector backends produce the same timeline/evidence contract:
 
   * external — the trained Layer-A detector (LSTM-AE + CVA, `TEPApp`) from
-    the anomaly training repo, used when FINAL_ANOMALY_REPO points at it.
+    the anomaly training repo, used when the C68-Anomaly checkout is found (FINAL_ANOMALY_REPO).
     Its emitted event dict IS the evidence handed to the adapter.
   * builtin  — a transparent statistical stand-in: per-sensor z-scores
     against a fault-free baseline, a rolling mean-square score, a threshold
@@ -235,59 +235,28 @@ def build_evidence(event_id: str, x: np.ndarray, z: np.ndarray, mu: np.ndarray,
 
 def _external(x: np.ndarray, viz: Dict[str, Any], cfg: DetectorConfig,
               scenario: Scenario) -> Optional[Dict[str, Any]]:
-    """Replay through the trained TEPApp detector when it is available.
+    """Replay through the trained C68-Anomaly pipeline when it is available.
 
-    Keeps the builtin z/raw arrays for visualisation; replaces scores,
-    alarms and events with the trained detector's. Any failure falls back
-    to the builtin timeline (logged), never breaks the tab.
+    `tep_sim/trained.py` owns the repairs that checkout needs (architecture
+    inference and a re-derived operating point); this function only swaps the
+    resulting scores, alarms and events in. Any failure keeps the builtin
+    timeline and adds a notice, so the tab never breaks.
     """
-    repo = os.getenv("FINAL_ANOMALY_REPO", "").strip()
-    if not repo or not os.path.isdir(repo):
+    from . import trained
+
+    if trained.repo_dir() is None:
         return None
     try:
-        if repo not in sys.path:
-            sys.path.insert(0, repo)
-        from main import TEPApp  # type: ignore
-        from utils import load_config  # type: ignore
-
-        cfg_path = os.getenv("FINAL_ANOMALY_CONFIG",
-                             os.path.join(repo, "configs", "config.yaml"))
-        app = TEPApp(load_config(cfg_path), enable_llm=False)
-        threshold = float(os.getenv("FINAL_ANOMALY_THRESHOLD", "0.687363"))
-        scores, flags, events = [], [], []
-        last = 0.0
-        for t, row in enumerate(x):
-            res = app.process_sensor_stream(
-                {"values": [float(v) for v in row], "sample_index": t,
-                 "is_fault": bool(scenario.fault)}) or {}
-            if res.get("window_score") is not None:
-                last = float(res["window_score"])
-            scores.append(round(last, 4))
-            flags.append(int(bool(res.get("is_anomalous"))))
-            if res.get("anomaly_detected") and res.get("event") is not None:
-                ev = res["event"]
-                for conv in ("model_dump", "dict", "to_dict"):
-                    if not isinstance(ev, dict) and hasattr(ev, conv):
-                        ev = getattr(ev, conv)()
-                if isinstance(ev, dict):
-                    ev_id = res.get("event_id") or ev.get("event_id") or f"ANOM-{t}"
-                    events.append({"event_id": ev_id, "start_tick": t,
-                                   "confirm_tick": t, "end_tick": None,
-                                   "evidence": {**ev, "event_id": ev_id},
-                                   "values": [round(float(v), 5) for v in row]})
-        out = dict(viz)
-        out.update({"scores": scores, "anomalous": flags, "events": events,
-                    "detector": {"backend": "external",
-                                 "name": "trained LSTM-AE + CVA (TEPApp)",
-                                 "threshold": threshold, "window": 60,
-                                 "confirm": 3, "calibration": "training repo"}})
-        return out
+        result = trained.replay(scenario, samples=x)
     except Exception as exc:
-        logger.warning("external detector unavailable, using builtin: %s", exc)
+        logger.warning("trained detector unavailable, using builtin: %s", exc)
         viz.setdefault("notices", []).append(
-            f"Trained detector failed to run ({type(exc).__name__}); "
+            f"Trained detector failed to run ({type(exc).__name__}: {exc}); "
             "showing the builtin statistical detector.")
         return None
+    out = dict(viz)
+    out.update(result)
+    return out
 
 
 # -- prompt framing ----------------------------------------------------------

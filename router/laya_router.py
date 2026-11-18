@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional
 
 from .base import BaseRouter, RouterDecision
 from .latency import StepClock
+from .laya_gate import LayaGate
 
 # The SDK's abstention gate is defined on `answer_confidence` = max(p), not
 # on the entropy `confidence` (see laya/confidence.py): the latter moves with
@@ -133,9 +134,14 @@ class LayaRouter(BaseRouter):
         self._device = device
         self._load_error: Optional[str] = None
         self.min_confidence = min_confidence
+        # Fine-tuned BASE/DEEPFAKE checkpoint (models/laya_router). It owns the
+        # deepfake boundary; the zero-shot model below still owns the rest.
+        self._gate = LayaGate(device)
+        self._last_gate: Optional[Dict[str, Any]] = None
 
     def route(self, payload: Dict[str, Any]) -> RouterDecision:
         clock = StepClock()
+        self._last_gate = None
 
         with clock.step("pre_gate"):
             shaped = self._shape(payload)
@@ -174,6 +180,7 @@ class LayaRouter(BaseRouter):
                 "laya_answer_confidence": ans.get("answer_confidence"),
                 "laya_entropy_confidence": ans.get("confidence"),
                 "laya_probabilities": ans.get("probabilities"),
+                "gate": self._last_gate,
                 "guard": guard,
             },
         )
@@ -233,6 +240,25 @@ class LayaRouter(BaseRouter):
                     "explicit-reasoning")
 
         sig = _text_signals(body)
+        # The fine-tuned Router/ checkpoint decides the deepfake boundary: it
+        # was trained on exactly this question ("does this turn ask for a new
+        # authenticity verdict?", 98.0% on its frozen test). It is consulted
+        # before the regex cues; BASE means the turn is a discussion of an
+        # existing verdict, a definition or plain chat, so the regex-only
+        # deepfake signal is dropped and the request falls through to
+        # anomaly / reasoning / general.
+        # Our chat holds the image context the checkpoint expects: text that
+        # names an image is scored with an available asset, so the gate can
+        # separate 'check this photo' from 'explain the verdict you gave'.
+        image_mentioned = bool(_IMAGE_CUE.search(body)
+                               and _IMAGE_VERDICT.search(body))
+        gate = self._gate.classify(body, image_attached=image_mentioned)
+        self._last_gate = gate
+        if gate is not None:
+            if gate["route"] == "DEEPFAKE":
+                return ("deepfake", gate["probability"],
+                        "gate:finetuned-deepfake", False, "finetuned-deepfake")
+            sig = {**sig, "deepfake": False}
         if task in ("anomaly", "deepfake", "reasoning") and not sig[task]:
             picked = self._pick(sig)
             return (picked, confidence, f"guard:{task}->{picked}", False,

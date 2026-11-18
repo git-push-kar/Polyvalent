@@ -11,10 +11,19 @@ Base model (shared by every specialist):
 
 | Routed task | Path | Format | Copied from |
 |---|---|---|---|
-| `anomaly` | `adapters/anomaly` | PEFT LoRA r=16 / a=32 on q,k,v,o,gate,up,down | `C:\Users\Admin\Desktop\anomaly\outputs\tep_rca_internvl3_2b\internvl3_2b_pristine_rca` |
+| `anomaly` | `adapters/anomaly` | PEFT LoRA r=16 / a=32 on q,k,v,o,gate,up,down | `C:\Users\Admin\Desktop\C68-Anomaly` (trained RCA adapter; the checkout no longer ships the safetensors, this copy is the artifact) |
 | `reasoning` | `adapters/reasoning` | PEFT LoRA r=64 / a=128 on q,k,v,o,gate,up,down | `C:\Users\Admin\Desktop\C68-LR\models_v3\adapter\adapter` |
 | `deepfake` | `adapters/deepfake` | `llm_adapter/` (r=64), `vision_adapter/` (r=16), `custom_heads/custom_heads.safetensors` | `C:\Users\Admin\Desktop\LY_C68\deepfake_project\runs\intern_v2_ground\adapters` |
 | `general` | - | pristine base, no adapter | - |
+
+Router (not an adapter — its own checkpoint):
+
+`models/laya_router` — the fine-tuned BASE/DEEPFAKE Laya head from
+`C:\Users\Admin\Desktop\Router\model\trained_laya_router`
+(SHA-256 `cbca78ad4c27a037...`). Loaded by `router/laya_gate.py`; it decides the
+deepfake boundary, while the zero-shot `laya` packs still route
+anomaly / reasoning / general.
+
 
 Adapters load lazily, on the first request Laya routes to their task
 (`router/residency.py`). At most one of `anomaly` / `reasoning` is attached

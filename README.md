@@ -122,6 +122,8 @@ Other settings:
 | `FINAL_ADAPTER_POLICY` | `swap` | `swap` or `keep` (see above) |
 | `FINAL_LEASE_TIMEOUT` | `600` | seconds to wait for a busy model |
 | `FINAL_LAYA_MIN_CONF` | `0.30` | Laya abstention threshold on max(p) |
+| `FINAL_LAYA_ROUTER_DIR` | `models/laya_router` | fine-tuned BASE/DEEPFAKE Laya checkpoint (deepfake gate) |
+| `FINAL_LAYA_ROUTER_DEVICE` | `cpu` | device for that checkpoint |
 | `FINAL_STUB_GENERATION` | `0` | `1` = no weights; placeholder text, real routing and swap bookkeeping |
 | `FINAL_TEP_TEST_DIR` | `data/tep_test` | TEP test runs for the anomaly tab |
 | `FINAL_TEP_FAULT_ONSET` | `160` | sample index where faults start (both public test sets) |
@@ -169,7 +171,10 @@ Use `--workers 1`. Each worker process would load its own copy of the weights.
    not TEP physics. Fault onset comes from `FINAL_TEP_FAULT_ONSET` if set, else
    `dataset.json`, else 160.
 2. **Detection.** `POST /anomaly/run` replays the run through a detector:
-   - With `FINAL_ANOMALY_REPO` set, it uses the trained `TEPApp` detector (LSTM-AE + CVA). That integration follows the API in the integration guide but has not been run against the real repo yet. If it fails, the service falls back to the built-in detector and the UI says so.
+   - **Trained pipeline (default when `C68-Anomaly` is beside this repo).** `tep_sim/trained.py` runs the checkpoint through that repo's own `TEPApp` — normal-only scaler, LSTM-AE, event aggregation and evidence bridge. `FINAL_ANOMALY_REPO` points it elsewhere, `FINAL_ANOMALY_CONFIG` selects another config. Two defects in the shipped artifacts are repaired at load time and reported in `detector.threshold_source`:
+     * `outputs/anomaly_detector/config.json` claims hidden 128 / latent 64 while `model.pt` is 32/16, so the stock loader can never accept the checkpoint. Shapes are inferred from the tensors instead.
+     * `threshold.json` (0.687) belongs to an older, larger model: the shipped 32/16 net scores fault-free runs at 0.97–1.50, so that operating point alarms on every window. The threshold is re-derived as **p99 of the fault-free windows** in `data/tep_test` (1.479 today), or pinned with `FINAL_ANOMALY_THRESHOLD`.
+     The checkpoint is undertrained (`val_mse: nan`) and does not reproduce the C68-Anomaly report's 128/64 numbers: at 1.479 it detects 53/60 test runs offline (Fault 15 yes, Fault 4 no) and leaves fault-free runs clean. If the checkout or the replay fails, the tab falls back to the built-in detector and says so.
    - Otherwise it uses the built-in statistical detector: z-scores against a fault-free baseline, a rolling mean-square score, a threshold calibrated on normal data, and 6 consecutive alarms to confirm an event.
 3. **Evidence.** A confirmed event becomes the structured evidence dictionary described in the integration guide (§2.2): the top deviating sensors with observed and baseline values, deviation %, z-score and trend; the onset sequence; the candidate subsystem; safety limits; and severity.
 4. **Reasoning.** `POST /anomaly/reason` sends the evidence through **Laya**. The sensor-vector modality routes it to `anomaly`, the anomaly LoRA is loaded if needed, and the adapter streams a JSON root-cause report using the training-time framing (`[ANOMALY INCIDENT TELEMETRY]` block). Follow-up questions use the follow-up system prompt with the same telemetry. The model only ever sees the evidence, never the raw time series.
