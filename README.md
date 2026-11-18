@@ -80,6 +80,12 @@ follow-up such as "Explain that verdict" is routed again (normally `BASE`) and
 receives the recorded analysis — not a second forensic pass; an explicit rerun
 is what sends it back to `DEEPFAKE`.
 
+That exchange is not replayed raw into routing history: the checkpoint reads a
+prior authenticity request as work still pending, so a greeting after a verdict
+re-fired DEEPFAKE. `last_analysis` already carries the result, so the routing
+view substitutes one neutral completion line for the forensics turn. Generation
+history keeps the full transcript.
+
 The anomaly endpoint (`/anomaly/reason`) and the research endpoint
 (`/route/laya/predict`) keep the four-way zero-shot `LayaRouter`
 (`router/laya_router.py`) for `deepfake / anomaly / reasoning / general`; its

@@ -71,8 +71,10 @@ def main() -> int:
         id="an_1", image_id=asset.id, verdict="FAKE", confidence=0.91,
         hotspots="Eyes & Facial midline", spectral="high-frequency residue",
         explanation="Blending seams around the eyes."))
-    store.add_turn(conv, "user", "Is the face in this photo real or fake?")
-    store.add_turn(conv, "assistant", analysis.history_text())
+    store.add_turn(conv, "user", "Is the face in this photo real or fake?",
+                   kind="analysis")
+    store.add_turn(conv, "assistant", analysis.history_text(),
+                   kind="analysis")
 
     follow = ask("case 3 follow-up about the verdict",
                  "Explain that verdict", expect="general")
@@ -83,6 +85,13 @@ def main() -> int:
     ask("case 4 explicit authenticity rerun",
         "Check the same photo again and rerun the real/fake analysis",
         expect="deepfake")
+
+    # Regression: a neutral greeting after a verdict must not re-fire DEEPFAKE.
+    # The saved analysis replaces the raw forensics exchange in routing history.
+    for greeting in ("hello", "kaisa h"):
+        ask(f"greeting after verdict: {greeting!r}", greeting, expect="general")
+    ask("explicit rerun still deepfake",
+        "check it again", expect="deepfake")
 
     print("\n--- generation context for case 3")
     ctx = store.generation_context(conv, image_id=asset.id)

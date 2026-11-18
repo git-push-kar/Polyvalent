@@ -679,11 +679,14 @@ def _chat_stream(req: ChatRequest):
         yield _sse({"event": "done"})
         return
 
-    # One persistent transcript, updated only after the answer exists.
-    store.add_turn(conversation_id, "user", req.message)
+    # One persistent transcript, updated only after the answer exists. A
+    # forensics exchange is marked so the routing view can replace it with the
+    # saved analysis instead of replaying the raw request and report.
+    turn_kind = "analysis" if task == "deepfake" else "chat"
+    store.add_turn(conversation_id, "user", req.message, kind=turn_kind)
     answer = "".join(answer_parts).strip()
     if answer:
-        store.add_turn(conversation_id, "assistant", answer)
+        store.add_turn(conversation_id, "assistant", answer, kind=turn_kind)
     _log_chat_run({**log_record, "outcome": "answered", **gen,
                    "conversation_id": conversation_id})
     yield _sse({"event": "done", "conversation_id": conversation_id})

@@ -148,12 +148,13 @@ class Conversation:
         return asset if asset and asset.usable else None
 
     # -- turns ----------------------------------------------------------
-    def add_turn(self, role: str, content: str) -> None:
+    def add_turn(self, role: str, content: str, kind: str = "chat") -> None:
         text = (content or "").strip()
         if not text:
             return
         self.turns.append({"role": role if role in ("user", "assistant") else "user",
-                           "content": text, "ts": round(time.time(), 3)})
+                           "content": text, "ts": round(time.time(), 3),
+                           "kind": kind})
         self.updated_at = time.time()
 
     def seed_history(self, history: List[Any]) -> None:
@@ -163,6 +164,7 @@ class Conversation:
                 self.add_turn(turn.get("role", "user"), str(turn["content"])[:2000])
 
     def history(self, limit: int) -> List[Dict[str, str]]:
+        """Generation view: the real transcript, analysis turns included."""
         return [{"role": t["role"], "content": t["content"]}
                 for t in self.turns[-limit:]]
 
@@ -263,18 +265,35 @@ class ConversationStore:
 
     # -- views ----------------------------------------------------------
     def routing_state(self, conversation_id: str, message: str) -> Dict[str, Any]:
-        """The exact five-field input, populated from server-side state."""
+        """The exact five-field input, populated from server-side state.
+
+        The deepfake exchange is *not* replayed raw into `history`. The
+        checkpoint (trained with one short summary turn per prior exchange)
+        reads a raw prior authenticity request as an operation still pending,
+        so a neutral follow-up ("hello") re-fires DEEPFAKE. Once an analysis
+        exists it is already carried by `last_analysis`, so routing history
+        replaces that exchange with a neutral completion line. Generation
+        history keeps the full transcript; only the routing view is compacted.
+        """
         with self._lock:
             conv = self.get_or_create(conversation_id)
             assets = ([conv.assets[i].routing_view()
                        for i in conv.assets] if conv.assets else [])
             active = conv.active_image_id
-            last = conv.last_analysis()
+            analysis = conv.analysis_for_image(active)
+            last = analysis or conv.last_analysis()
             history = [
                 {"role": t["role"],
                  "content": t["content"][:ROUTING_TURN_CHARS]}
-                for t in conv.turns[-ROUTING_HISTORY_TURNS:]
-            ]
+                for t in conv.turns
+                if t.get("kind") != "analysis"
+            ][-ROUTING_HISTORY_TURNS:]
+            if analysis is not None:
+                history = (history + [{
+                    "role": "assistant",
+                    "content": ("I completed the authenticity check for "
+                                f"{analysis.image_id}; the result is saved."),
+                }])[-ROUTING_HISTORY_TURNS:]
             return {"message": message or "", "history": history,
                     "assets": assets, "active_image_id": active,
                     "last_analysis": last.routing_view() if last else None}
@@ -295,6 +314,7 @@ class ConversationStore:
             conv.record_analysis(analysis)
             return analysis
 
-    def add_turn(self, conversation_id: str, role: str, content: str) -> None:
+    def add_turn(self, conversation_id: str, role: str, content: str,
+                 kind: str = "chat") -> None:
         with self._lock:
-            self.get_or_create(conversation_id).add_turn(role, content)
+            self.get_or_create(conversation_id).add_turn(role, content, kind=kind)
