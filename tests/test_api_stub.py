@@ -21,6 +21,7 @@ client = TestClient(srv.app)
 @pytest.fixture(autouse=True)
 def fresh_service():
     srv._SERVICE = None
+    srv._CONVERSATIONS = srv.ConversationStore()
     yield
 
 
@@ -42,12 +43,48 @@ def adapter(evs):
     return next(e for e in evs if e["event"] == "adapter")
 
 
+def _png_b64() -> str:
+    """A real, decodable image: attachments are validated before routing."""
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (10, 120, 200)).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+class _FakeTrainedRouter:
+    """Deterministic stand-in: these tests exercise swap mechanics, not LAYA."""
+
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def route(self, state):
+        task = self.mapping.get(state.get("message"), "general")
+        return srv.RouterDecision(
+            router="laya-finetuned", task=task, confidence=1.0,
+            reason=f"test:{task}", latency_ms=0.0,
+            extra={"gate": {"route": "DEEPFAKE" if task == "deepfake" else "BASE"},
+                   "router_input": json.dumps(state, sort_keys=True),
+                   "input_tokens": 1, "input_budget": 374,
+                   "history_turns": len(state.get("history") or []),
+                   "history_dropped": 0})
+
+
+@pytest.fixture(autouse=True)
+def fake_router():
+    srv._TRAINED = _FakeTrainedRouter({})
+    yield
+    srv._TRAINED = None
+
+
 def test_task_changes_swap_adapters():
-    r = adapter(chat("If all cats are mammals and Tom is a cat, then is Tom a mammal? Prove it step by step."))
+    srv._TRAINED = _FakeTrainedRouter({
+        "is this face real or fake?": "deepfake",
+    })
+    r = adapter(chat("Prove it step by step.", deep_thinking=True))
     assert r["task"] == "reasoning" and r["loaded"] == ["base", "reasoning"]
 
-    img = base64.b64encode(b"not-really-an-image").decode()
-    d = adapter(chat("is this face real or fake?", image_base64=img))
+    d = adapter(chat("is this face real or fake?", image_base64=_png_b64()))
     assert d["task"] == "deepfake"
     assert d["loaded"] == ["deepfake"] and "reasoning" in d["unloaded"]
 
@@ -59,8 +96,13 @@ def test_task_changes_swap_adapters():
     assert st["task"] == "general" and st["lora"] is None
 
 
-def test_text_only_deepfake_request_does_not_evict_resident_adapter():
-    chat("Solve this logic puzzle step by step: if A then B; A; therefore?")
+def test_text_only_deepfake_request_does_not_load_the_pipeline():
+    """Even when the router asks for DEEPFAKE, no pixels means no pipeline."""
+    srv._TRAINED = _FakeTrainedRouter({
+        "Check whether this face photo is real or fake": "deepfake",
+    })
+    chat("Solve this logic puzzle step by step: if A then B; A; therefore?",
+         deep_thinking=True)
     evs = chat("Check whether this face photo is real or fake")
     assert not any(e["event"] == "adapter" for e in evs)
     assert any(e["event"] == "notice" for e in evs)

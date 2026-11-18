@@ -509,6 +509,7 @@ window.addEventListener('hashchange', () => showView(location.hash.slice(1)));
 /* ============================== CHAT ============================== */
 const box = $('box'), sendBtn = $('send'), thread = $('thread'), logEl = $('log');
 let chatHistory = [], attached = null, controller = null;
+let conversationId = null;  // server-side transcript/routing state for this thread
 let deepThink = false;  // toggle: route every message to the reasoning adapter
 
 function autosize() { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight, 180) + 'px'; }
@@ -539,7 +540,8 @@ $('deepThink').onchange = () => {
 };
 $('newChat').onclick = () => {
   if (controller) controller.abort();
-  chatHistory = []; thread.innerHTML = ''; thread.appendChild(emptyState); emptyState.style.display = '';
+  chatHistory = []; conversationId = null;
+  thread.innerHTML = ''; thread.appendChild(emptyState); emptyState.style.display = '';
   box.focus();
 };
 const emptyState = $('empty');
@@ -610,7 +612,8 @@ async function ask() {
   const begin = () => { if (!started) { started = true; ui.ans.classList.remove('typing'); ui.ans.textContent = ''; ui.ans.classList.add('cursor'); } };
   try {
     const forced = deepThink;  // captured per request, so a mid-stream toggle cannot mix
-    const body = { message, history: chatHistory.slice(-6), max_new_tokens: 768 };
+    if (!conversationId) conversationId = 'chat_' + (crypto.randomUUID ? crypto.randomUUID().slice(0, 13) : String(Date.now()));
+    const body = { message, conversation_id: conversationId, history: chatHistory.slice(-6), max_new_tokens: 768 };
     if (forced) body.deep_thinking = true;
     if (img) body.image_base64 = img.b64;
     await sse('/chat/stream', body, ev => {

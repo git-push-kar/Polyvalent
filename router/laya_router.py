@@ -207,17 +207,20 @@ class LayaRouter(BaseRouter):
             return False
 
     def _shape(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Free input shaping only — modality short-circuits obvious cases
-        without spending a forward pass; text goes to Laya untouched."""
-        if any(payload.get(k) for k in
-               ("image_bytes", "image_base64", "image_path", "pixel_values")):
-            return {"modality": "image", "body": "face image for real/fake verdict"}
+        """Free input shaping only — the text always reaches Laya untouched.
+
+        An attachment is metadata, never a routing decision: the user's
+        message survives verbatim so the model can tell "check this photo"
+        from "describe the person in this photo".
+        """
+        body = payload.get("text") or payload.get("prompt") or ""
+        has_image = any(payload.get(k) for k in
+                        ("image_bytes", "image_base64", "image_path",
+                         "pixel_values"))
         values = payload.get("values")
         if isinstance(values, list) and len(values) == 52:
-            return {"modality": "sensor_vector",
-                    "body": payload.get("text", "TEP 52-channel sensor window")}
-        return {"modality": "text",
-                "body": payload.get("text") or payload.get("prompt") or ""}
+            return {"modality": "sensor_vector", "body": body}
+        return {"modality": "image" if has_image else "text", "body": body}
 
     def _guard(self, shaped: Dict[str, Any], task: str, confidence: float,
                reason: str, abstained: bool) -> tuple:
@@ -228,13 +231,12 @@ class LayaRouter(BaseRouter):
         chat fall back to `general` so the base model can answer.
         """
         modality = shaped.get("modality")
-        if modality == "image":
-            return ("deepfake", confidence, "guard:image", False, "image")
         if modality == "sensor_vector":
             return ("anomaly", confidence, "guard:sensor_vector", False,
                     "sensor_vector")
 
         body = shaped.get("body") or ""
+        attached = modality == "image"
         if _explicit_reasoning(body):
             return ("reasoning", confidence, "guard:explicit-reasoning", False,
                     "explicit-reasoning")
@@ -250,7 +252,9 @@ class LayaRouter(BaseRouter):
         # Our chat holds the image context the checkpoint expects: text that
         # names an image is scored with an available asset, so the gate can
         # separate 'check this photo' from 'explain the verdict you gave'.
-        image_mentioned = bool(_IMAGE_CUE.search(body)
+        # "Attached" for the checkpoint means an executable asset exists: the
+        # caller attached bytes this turn. The message itself still decides.
+        image_mentioned = bool(attached and _IMAGE_CUE.search(body)
                                and _IMAGE_VERDICT.search(body))
         gate = self._gate.classify(body, image_attached=image_mentioned)
         self._last_gate = gate

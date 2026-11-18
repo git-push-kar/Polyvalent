@@ -24,9 +24,10 @@ The web UI has three workspaces:
 
 ```
             ┌──────────────────────────────────────────────┐
-request ──► │ Laya router (router/laya_router.py)          │
-            │  pre_gate → laya_forward → arbitration       │
-            │  → support guard (text cues / modality)      │
+request ──► │ Fine-tuned Laya router                       │
+            │  (router/trained_router.py)                  │
+            │  five-field state → questions.json model     │
+            │  → BASE | DEEPFAKE                           │
             └───────────────┬──────────────────────────────┘
                             │ task
             ┌───────────────▼──────────────────────────────┐
@@ -43,19 +44,50 @@ request ──► │ Laya router (router/laya_router.py)          │
                     token stream (SSE) ──► UI
 ```
 
-### Routing (Laya)
+### Routing (fine-tuned Laya)
 
-`router/laya_router.py` is the only router. It asks Laya one four-way question
-(`deepfake / anomaly / reasoning / general`) and then applies a deterministic
-**support guard**:
+Chat turns are routed by the checkpoint trained in the `Router` project
+(`models/laya_router`, SHA-256 `cbca78ad…97e8`), loaded by
+`router/trained_router.py`. It is asked the question the checkpoint was fitted
+on — `BASE` or `DEEPFAKE` — over the five-field runtime state:
 
-- An attached image always goes to `deepfake`. A 52-value sensor vector always goes to `anomaly`.
-- Laya can only pick a specialist when the text contains cues for it. Otherwise the request falls back to `general`. For example, "what is your name" never reaches the deepfake adapter.
-- "Use / load the reasoning adapter" forces `reasoning`. The directive is removed from the prompt before generation.
-- A low-confidence abstention picks the specialist the cues point to, or `general` if there are none.
+```json
+{"message": "...", "assets": [], "active_image_id": null,
+ "last_analysis": null, "history": []}
+```
 
-Every override is recorded as `reason=guard:*`. The raw Laya probabilities are
-kept in `extra` and written to `logs/chat_runs.jsonl`.
+`router/conversations.py` builds that state server-side: real recent turns,
+trusted attachment metadata (`id/kind/availability/support`), and the last
+analysis in the archive's `{asset_id, confidence, evidence_summary, verdict}`
+shape. Pixels never enter it, and `deep_thinking` is not part of it.
+
+- `BASE` → the shared base model, with the actual image passed through
+  InternVL's multimodal interface when one is attached.
+- `DEEPFAKE` → the existing forensic pipeline (classifier verdict, telemetry,
+  tagged reasoning), only when the active asset is available and supported.
+- `deep_thinking=true` → the LR (reasoning) adapter directly; no router call.
+
+There are no keyword rules, modality short-circuits or canned replies: an
+attachment never bypasses the checkpoint, and "describe the person in this
+image" is decided on the message, not on the presence of a file. Residual
+context overflow drops the oldest history turns first (the message is
+serialized first), and the receipt reports `history_dropped` rather than
+silently losing the request.
+
+After a deepfake run the verdict, score, hotspot/spectral evidence and the
+user-visible explanation are stored against that conversation and image. A
+follow-up such as "Explain that verdict" is routed again (normally `BASE`) and
+receives the recorded analysis — not a second forensic pass; an explicit rerun
+is what sends it back to `DEEPFAKE`.
+
+The anomaly endpoint (`/anomaly/reason`) and the research endpoint
+(`/route/laya/predict`) keep the four-way zero-shot `LayaRouter`
+(`router/laya_router.py`) for `deepfake / anomaly / reasoning / general`; its
+image short-circuit was removed so it also routes on the message.
+
+Every routing receipt carries the serialized input, the checkpoint's route and
+probabilities, and the token budget; the same data is written to
+`logs/chat_runs.jsonl`.
 
 ### Adapter residency (lazy load and swap)
 
@@ -80,8 +112,9 @@ A second request cannot swap weights while a stream is running. It waits, up to
 `FINAL_LEASE_TIMEOUT` seconds (600 by default), and then gets a "busy" notice.
 If the client disconnects, generation stops and the lease is released.
 
-A text-only "is this face fake?" request is answered with "attach an image"
-**before** any loading starts, so the adapter currently loaded stays where it is.
+A text-only "is this face fake?" request has no executable image, so the
+checkpoint answers BASE and the base model replies that it cannot see one — no
+forensic weights are loaded and the resident adapter stays where it is.
 
 ---
 
@@ -90,7 +123,7 @@ A text-only "is this face fake?" request is answered with "attach an image"
 - Python 3.10+ (developed on 3.11)
 - `fastapi`, `uvicorn`, `pydantic>=2`, `numpy`
 - For real generation: `torch`, `transformers`, `peft`, `safetensors`, `pillow`, `torchvision`
-- `laya` (the router SDK). Without it, routing falls back to the support guard, and every receipt says `laya-unavailable`.
+- `laya` (the SDK that loads both Laya checkpoints). Without it the chat router cannot load: receipts say `gate-unavailable` and turns answer with the base model.
 - Optional: `pytest` for the tests, `pyreadr` to split `.RData` TEP files
 
 ```powershell
@@ -196,13 +229,16 @@ Use `--workers 1`. Each worker process would load its own copy of the weights.
 SSE events (one JSON object per `data:` line):
 
 ```
+routing      {"router", "task", "reason", "input": <five-field state>, "output": <gate route/probabilities>, "input_tokens", "input_budget"}
 route        {"task": "reasoning", "label": ...}           Laya's choice
+context      {"history_turns", "analysis_id", "image_id", "analysis_supplied"}   what generation received
 adapter      {"task", "loaded": [...], "unloaded": [...], "cold", "swap_ms"}
 verdict      {"verdict": "REAL|FAKE", "confidence", "hotspots", "spectral"}   deepfake
+analysis_saved {"analysis_id", "image_id", "verdict", "confidence"}          deepfake
 thinking     {"text"}   deliberation (the UI shows it collapsed)
 token        {"text"}   visible answer, streamed as it is generated
-notice       {"text"}   UI feedback (attach an image, busy, load failure); not part of the conversation
-done
+notice       {"text"}   UI feedback (unreadable image, busy, load failure); not part of the conversation
+done         {"conversation_id"}
 ```
 
 ## Tests
@@ -218,13 +254,20 @@ Live-model regression scripts are in `scripts/`. For example,
 `scripts/verify_chat_routing.py` and `scripts/verify_deepfake_live.py` load the
 real weights, so stop the server before running them.
 
+`scripts/verify_trained_routing.py` checks the five routing cases against the
+fine-tuned checkpoint (no generation), and
+`scripts/live_chat_trace.py` posts one turn to a running server and prints the
+routing/context/adapter receipts.
+
 ## Repository layout
 
 ```
 api/server.py            FastAPI app, SSE endpoints, lease handling
-router/laya_router.py    Laya router + support guard
+router/trained_router.py fine-tuned BASE/DEEPFAKE chat router (five-field state)
+router/conversations.py  server-side turns, image assets, saved analyses
+router/laya_router.py    four-way Laya router (anomaly + research endpoints)
 router/residency.py      lazy load / swap policy (torch-free, unit-tested)
-router/adapter_service.py  real backends (PEFT attach/unload, deepfake wrapper), streaming
+router/adapter_service.py  real backends (PEFT attach/unload, deepfake wrapper), streaming + image answers
 router/prompts.py        training-faithful system prompts per task
 deepfake/                ported DeepfakeReasoningModel wrapper, loader, forensics
 tep_sim/                 TEP metadata, dataset loading, detector, evidence → prompt
@@ -240,5 +283,5 @@ tests/                   pytest suite (runs without GPU or weights)
 
 - **"I couldn't load the … adapter"**: a path is wrong or the weights don't match the base. The server log has the full traceback. LoRA attach fails loudly when keys don't map ("Refusing silent base-model generation"). The service then drops the half-wrapped base, and the next request loads a clean one.
 - **CUDA out of memory when switching to deepfake**: use the default `swap` policy, which keeps only one backbone resident.
-- **Every request routes to `general`**: `laya` is probably not installed. Check `extra.laya_available` in `/route/laya/predict` receipts.
+- **Every chat turn routes to `general`**: the fine-tuned checkpoint is missing (`FINAL_LAYA_ROUTER_DIR`/`models/laya_router`) and receipts say `gate-unavailable`. Check the `routing` event's `reason`.
 - **"The model is busy"**: another stream holds the lease. It is released when that stream finishes or its client disconnects.

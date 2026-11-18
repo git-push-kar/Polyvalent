@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 
@@ -45,8 +46,10 @@ from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from router import AdapterService, LayaRouter
+from router import AdapterService, LayaRouter, TrainedLayaRouter
 from router.adapter_service import BusyError, TagSectioner, TagStripper
+from router.base import RouterDecision
+from router.conversations import Analysis, ConversationStore
 from router.prompts import clean_adapter_directive
 
 logger = logging.getLogger(__name__)
@@ -83,10 +86,27 @@ TASK_LABELS = {
 
 
 def get_laya() -> LayaRouter:
+    """Four-route zero-shot Laya (anomaly endpoint + research endpoint)."""
     global _LAYA
     if _LAYA is None:
         _LAYA = LayaRouter()
     return _LAYA
+
+
+_TRAINED: Optional[TrainedLayaRouter] = None
+_CONVERSATIONS = ConversationStore()
+
+
+def get_trained_router() -> TrainedLayaRouter:
+    """The fine-tuned BASE/DEEPFAKE router that answers chat turns."""
+    global _TRAINED
+    if _TRAINED is None:
+        _TRAINED = TrainedLayaRouter()
+    return _TRAINED
+
+
+def get_conversations() -> ConversationStore:
+    return _CONVERSATIONS
 
 
 # Weights live inside this repository (copied from the training runs, which
@@ -198,7 +218,16 @@ def _sse_response(gen) -> StreamingResponse:
 
 
 def _route(payload: Dict[str, Any]):
+    """Four-route zero-shot routing (anomaly + research endpoints)."""
     decision = get_laya().route(payload)
+    _STATS["laya"]["n"] += 1
+    _STATS["laya"]["routing_ms"] += decision.latency_ms
+    return decision
+
+
+def _route_trained(state: Dict[str, Any]):
+    """Chat routing: the fine-tuned checkpoint over the five-field state."""
+    decision = get_trained_router().route(state)
     _STATS["laya"]["n"] += 1
     _STATS["laya"]["routing_ms"] += decision.latency_ms
     return decision
@@ -227,12 +256,11 @@ def _load_failed_text(task: str, exc: Exception) -> str:
             "adapter paths in the README and the server log.")
 
 
-def _stream_text(service: AdapterService, task: str, prompt: str, *,
-                 max_new_tokens: int, temperature: float,
-                 repetition_penalty: float, stub: Optional[bool],
-                 receipts: bool = False,
-                 sink: Optional[Dict[str, Any]] = None) -> Iterator[Dict[str, Any]]:
-    """Generate on the resident model; yield thinking/token/notice events.
+def _stream_events(task: str, chunks: Iterator[Dict[str, Any]], *,
+                   receipts: bool = False,
+                   sink: Optional[Dict[str, Any]] = None
+                   ) -> Iterator[Dict[str, Any]]:
+    """Shape a generation stream: thinking/token/notice events.
 
     `reasoning` emits <reasoning>...</reasoning><answer>...</answer>: the
     first section streams as `thinking` (collapsed by clients), the second
@@ -241,10 +269,7 @@ def _stream_text(service: AdapterService, task: str, prompt: str, *,
     sectioner = TagSectioner(default="answer") if task == "reasoning" else None
     scrub = TagStripper()
     saw_visible = False
-    for chunk in service.stream(prompt, max_new_tokens=max_new_tokens,
-                                temperature=temperature,
-                                repetition_penalty=repetition_penalty,
-                                stub=stub):
+    for chunk in chunks:
         kind = chunk.get("event")
         if kind == "token":
             raw = chunk.get("text", "")
@@ -284,6 +309,20 @@ def _stream_text(service: AdapterService, task: str, prompt: str, *,
         tail = scrub.flush()
         if tail:
             yield {"event": "token", "text": tail}
+
+
+def _stream_text(service: AdapterService, task: str, prompt: str, *,
+                 max_new_tokens: int, temperature: float,
+                 repetition_penalty: float, stub: Optional[bool],
+                 receipts: bool = False,
+                 sink: Optional[Dict[str, Any]] = None) -> Iterator[Dict[str, Any]]:
+    """Text-only generation on the resident model."""
+    yield from _stream_events(
+        task,
+        service.stream(prompt, max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        repetition_penalty=repetition_penalty, stub=stub),
+        receipts=receipts, sink=sink)
 
 
 def _log_run(name: str, record: Dict[str, Any]) -> None:
@@ -411,8 +450,14 @@ class ChatTurn(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
+    conversation_id: Optional[str] = None
     history: list = Field(default_factory=list)  # [{role, content}], last 6 used
-    image_base64: Optional[str] = None  # attached image -> deepfake path
+    # Attachments: ids are client labels; bytes come as image_base64 (existing
+    # uploader) or may be omitted for an image already stored server-side.
+    image_ids: List[str] = Field(default_factory=list)
+    active_image_id: Optional[str] = None
+    image_base64: Optional[str] = None
+    media_type: Optional[str] = None
     max_new_tokens: int = 768  # room for fast+planning+reasoning+conclusion+answer
     temperature: float = 0.0
     repetition_penalty: float = 1.1  # mild loop-breaker for chat
@@ -436,42 +481,77 @@ _HISTORY_NOISE = (
 )
 
 
+def _routing_trace(decision) -> Dict[str, Any]:
+    """What the router saw and what it chose — never the generation prompt."""
+    extra = decision.extra or {}
+    return {"event": "routing", "router": decision.router,
+            "task": decision.task, "reason": decision.reason,
+            "input": extra.get("router_input"),
+            "output": extra.get("gate"),
+            "input_tokens": extra.get("input_tokens"),
+            "input_budget": extra.get("input_budget"),
+            "history_turns": extra.get("history_turns"),
+            "history_dropped": extra.get("history_dropped")}
+
+
 def _chat_stream(req: ChatRequest):
     service = get_service()
-    payload: Dict[str, Any] = {"text": req.message}
+    store = get_conversations()
+
+    conversation_id = ((req.conversation_id or "").strip()
+                       or f"chat_{uuid.uuid4().hex[:12]}")
+    conv = store.get_or_create(conversation_id)
+    # A client that keeps its own transcript can seed a fresh conversation;
+    # once the server has turns, the server's history is the single source.
+    if not conv.turns and req.history:
+        conv.seed_history(req.history)
+
+    # -- attachments become trusted, server-side assets -----------------
     if req.image_base64:
-        payload["image_base64"] = req.image_base64
+        try:
+            raw = base64.b64decode(req.image_base64)
+        except Exception:
+            raw = b""
+        asset_id = (req.image_ids[0] if req.image_ids
+                    else req.active_image_id)
+        asset = store.add_image(conversation_id, asset_id, raw,
+                                media_type=req.media_type or "")
+        if req.active_image_id:
+            store.set_active_image(conversation_id, req.active_image_id)
+        attachment = {"id": asset.id, "availability": asset.availability,
+                      "support": asset.support, "detail": asset.detail}
+    elif req.image_ids or req.active_image_id:
+        wanted = req.active_image_id or req.image_ids[0]
+        store.set_active_image(conversation_id, wanted)
+        asset = conv.active_asset()
+        attachment = ({"id": asset.id, "availability": asset.availability,
+                       "support": asset.support, "detail": asset.detail}
+                      if asset else None)
+    else:
+        asset = conv.active_asset()
+        attachment = None
 
-    # Laya only — it is the sole router by design.
-    decision = _route(payload)
+    # -- routing: LAYA's five-field state, or the explicit thinking pin --
+    if req.deep_thinking:
+        decision = RouterDecision(
+            router="manual", task="reasoning", confidence=1.0,
+            reason="manual:deep-thinking",
+            latency_ms=0.0, steps={}, abstained=False,
+            extra={"gate": None, "router_input": None})
+    else:
+        state = store.routing_state(conversation_id, req.message)
+        decision = _route_trained(state)
 
-    # UI toggle: "deep thinking" pins the message to the reasoning (LR)
-    # adapter. An attached image still wins — the forensic judge needs pixels.
-    if req.deep_thinking and "image_base64" not in payload:
-        decision.task = "reasoning"
-        decision.confidence = 1.0
-        decision.reason = "manual:deep-thinking"
-        decision.abstained = False
+    log_record: Dict[str, Any] = {
+        "conversation_id": conversation_id, "message": req.message,
+        "routing": decision.to_dict(), "attachment": attachment,
+        "active_image_id": conv.active_image_id}
 
-    log_record: Dict[str, Any] = {"message": req.message,
-                                  "routing": decision.to_dict()}
+    yield _sse({"event": "routing", "conversation_id": conversation_id,
+                **_routing_trace(decision)})
 
-    # The forensic judge needs pixels: ask for the image BEFORE selecting /
-    # loading the deepfake wrapper, so text-only requests stay instant and
-    # the currently resident adapter is not evicted for nothing.
-    if decision.task == "deepfake" and "image_base64" not in payload:
-        _log_chat_run({**log_record, "outcome": "no-image"})
-        yield _sse({"event": "route", "task": "deepfake",
-                    "label": TASK_LABELS["deepfake"]})
-        yield _sse({"event": "notice",
-                    "text": "I can check a face image for you — attach it with "
-                            "the 📎 button and ask again. For anything else, "
-                            "just type your question."})
-        yield _sse({"event": "done"})
-        return
-
-    # Chat UX: an abstention is not a wall. With no specialist signal the
-    # plain base model answers; the raw Laya decision stays in the log.
+    # Chat UX: an abstention is not a wall. With no trained signal the plain
+    # base model answers; the raw decision stays in the log.
     if decision.task == "needs_clarification":
         log_record["abstain_to_general"] = True
         decision.task = "general"
@@ -479,52 +559,112 @@ def _chat_stream(req: ChatRequest):
         decision.reason = "guard:general"
         decision.abstained = False
     task = decision.task
+
+    # DEEPFAKE is executable only for an available, supported image. The
+    # router checks this too; this is the second, independent guard so no
+    # code path can load the 6 GB pipeline without pixels it can read.
+    if task == "deepfake" and not (asset and asset.usable):
+        detail = asset.detail if asset else "no image attached"
+        store.add_turn(conversation_id, "user", req.message)
+        yield _sse({"event": "route", "task": "general",
+                    "label": TASK_LABELS["general"],
+                    "reason": f"deepfake-unusable-image:{detail}"})
+        yield _sse({"event": "notice",
+                    "text": "The authenticity check needs a readable JPG/PNG "
+                            "image, and the attached one is not usable "
+                            f"({detail}). Please attach one and ask again."})
+        _log_chat_run({**log_record, "outcome": "deepfake-no-image",
+                       "detail": detail})
+        yield _sse({"event": "done"})
+        return
+
     yield _sse({"event": "route", "task": task,
-                "label": TASK_LABELS.get(task, task)})
+                "label": TASK_LABELS.get(task, task),
+                "reason": decision.reason})
+
+    # -- generation context (separate from the routing view) ------------
+    image_id = conv.active_image_id if asset is not None else None
+    ctx = store.generation_context(conversation_id, image_id=image_id)
+    history_turns = ctx["history"]
+    analysis = ctx["analysis"]
+    analysis_block = ctx["analysis_block"]
+    # A recorded verdict is explained from the record. Passing the pixels
+    # again would invite a second, invented forensic read of the same image.
+    attach_pixels = bool(asset and asset.usable and not analysis_block)
+    yield _sse({"event": "context", "history_turns": len(history_turns),
+                "analysis_id": analysis.id if analysis else None,
+                "image_id": (image_id
+                             if (attach_pixels or task == "deepfake") else None),
+                "analysis_supplied": bool(analysis_block)})
 
     gen: Dict[str, Any] = {}
+    answer_parts: List[str] = []
     try:
         with service.lease(task) as selection:
             log_record["selection"] = selection
             yield _sse(_adapter_event(selection))
 
             if task == "deepfake":
+                verdict: Dict[str, Any] = {}
+                visible: List[str] = []
                 for chunk in service.analyze_image_stream(
-                        base64.b64decode(payload["image_base64"]),
+                        asset.data,
                         max_new_tokens=req.max_new_tokens,
                         temperature=req.temperature,
                         repetition_penalty=req.repetition_penalty,
                         stub=req.stub):
                     kind = chunk.get("event")
                     if kind == "verdict":
+                        verdict = chunk
                         log_record["verdict"] = chunk
                         yield _sse(chunk)
                     elif kind in ("thinking", "token", "notice"):
-                        yield _sse({"event": kind, "text": chunk.get("text", "")})
+                        if kind != "notice":
+                            visible.append(chunk.get("text", ""))
+                        yield _sse({"event": kind,
+                                    "text": chunk.get("text", "")})
                     elif kind == "generation_receipt":
                         gen["generation"] = chunk
+                explanation = "".join(visible).strip()
+                result = Analysis(
+                    id=f"an_{len(conv.analyses) + 1}",
+                    image_id=asset.id,
+                    verdict=str(verdict.get("verdict") or "UNKNOWN"),
+                    confidence=float(verdict.get("confidence") or 0.0),
+                    hotspots=str(verdict.get("hotspots") or ""),
+                    spectral=str(verdict.get("spectral") or ""),
+                    explanation=explanation,
+                    model="deepfake-wrapper")
+                store.record_analysis(conversation_id, result)
+                answer_parts.append(result.history_text())
+                log_record["analysis_id"] = result.id
+                yield _sse({"event": "analysis_saved", "analysis_id": result.id,
+                            "image_id": result.image_id,
+                            "verdict": result.verdict,
+                            "confidence": result.confidence})
             else:
-                # Last turns travel as proper chat turns; the prompt is
-                # rebuilt in the adapter's training-time framing.
-                norm_turns = []
-                for t in (req.history or [])[-6:]:
-                    if isinstance(t, ChatTurn):
-                        t = t.dict()
-                    if not (isinstance(t, dict) and t.get("content")):
-                        continue
-                    role = t.get("role", "user")
-                    content = str(t.get("content"))
-                    if role == "assistant" and content.startswith(_HISTORY_NOISE):
-                        continue  # retry notices must never become context
-                    norm_turns.append({"role": role, "content": content})
                 prompt_message = (clean_adapter_directive(req.message)
                                   if task == "reasoning" else req.message)
-                prompt = service.format_prompt(task, norm_turns, prompt_message)
-                for ev in _stream_text(service, task, prompt,
-                                       max_new_tokens=req.max_new_tokens,
-                                       temperature=req.temperature,
-                                       repetition_penalty=req.repetition_penalty,
-                                       stub=req.stub, sink=gen):
+                if attach_pixels:
+                    stream = service.stream_image_answer(
+                        "general", history_turns, prompt_message, asset.data,
+                        context=analysis_block,
+                        max_new_tokens=req.max_new_tokens,
+                        temperature=req.temperature,
+                        repetition_penalty=req.repetition_penalty,
+                        stub=req.stub)
+                else:
+                    prompt = service.format_prompt(
+                        task, history_turns, prompt_message,
+                        context=analysis_block)
+                    stream = service.stream(
+                        prompt, max_new_tokens=req.max_new_tokens,
+                        temperature=req.temperature,
+                        repetition_penalty=req.repetition_penalty,
+                        stub=req.stub)
+                for ev in _stream_events(task, stream, sink=gen):
+                    if ev.get("event") == "token":
+                        answer_parts.append(ev.get("text", ""))
                     yield _sse(ev)
     except BusyError:
         _log_chat_run({**log_record, "outcome": "busy"})
@@ -538,8 +678,15 @@ def _chat_stream(req: ChatRequest):
         yield _sse({"event": "notice", "text": _load_failed_text(task, exc)})
         yield _sse({"event": "done"})
         return
-    _log_chat_run({**log_record, "outcome": "answered", **gen})
-    yield _sse({"event": "done"})
+
+    # One persistent transcript, updated only after the answer exists.
+    store.add_turn(conversation_id, "user", req.message)
+    answer = "".join(answer_parts).strip()
+    if answer:
+        store.add_turn(conversation_id, "assistant", answer)
+    _log_chat_run({**log_record, "outcome": "answered", **gen,
+                   "conversation_id": conversation_id})
+    yield _sse({"event": "done", "conversation_id": conversation_id})
 
 
 @app.post("/chat/stream")
@@ -595,6 +742,16 @@ class AnomalyReasonRequest(BaseModel):
     stub: Optional[bool] = None
 
 
+def _first_onset(ev: Dict[str, Any]) -> str:
+    """First temporal-sequence name, for either stored shape (dict or list)."""
+    seq = ev.get("temporal_sequence")
+    if isinstance(seq, dict):
+        seq = seq.get("sequence")
+    if isinstance(seq, list) and seq and isinstance(seq[0], dict):
+        return str(seq[0].get("display_name", "n/a"))
+    return "n/a"
+
+
 def _stub_report(ev: Dict[str, Any]) -> str:
     """Stub-mode placeholder report (no model). Clearly marked as such."""
     top = ev.get("top_anomalous_sensors") or []
@@ -605,7 +762,7 @@ def _stub_report(ev: Dict[str, Any]) -> str:
         "confidence": 0.0,
         "summary": "Stub mode is on (FINAL_STUB_GENERATION=1); this report "
                    "is assembled from the evidence, not generated.",
-        "reasoning_steps": [f"First onset: {(ev.get('temporal_sequence') or {}).get('sequence', [{}])[0].get('display_name', 'n/a')}",
+        "reasoning_steps": [f"First onset: {_first_onset(ev)}",
                             "Mechanism: not generated in stub mode",
                             "Alternatives: not generated in stub mode"],
         "evidence": [f"{s.get('display_name')} observed {s.get('current_value')} "

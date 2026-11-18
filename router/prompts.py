@@ -115,9 +115,12 @@ GENERAL_SYSTEM = (
     "message directly, specifically, and concisely in plain markdown. Do not "
     "pad replies with stock filler, and do not end every answer with 'How can "
     "I assist you today?' — ask a follow-up only when it is genuinely needed.\n"
-    "Rules: never claim a human name or identity; never emit XML/markup tags "
-    "(no <reasoning>, <answer>, <question> or similar); never repeat the "
-    "user's question back as tags."
+    "Images: when an image is attached you can see it. Describe only what is "
+    "actually visible; say so plainly when a detail cannot be determined.\n"
+    "Rules: never claim to recognise or name a specific real person from a "
+    "photo; never invent identity, biographical or location facts; never emit "
+    "XML/markup tags (no <reasoning>, <answer>, <question> or similar, unless "
+    "the task prompt asks for them); never repeat the user's question back as tags."
 )
 
 # Selected only for routed `reasoning` turns, when `AdapterService.select`
@@ -140,10 +143,17 @@ SYSTEM_BY_TASK = {
 }
 
 
-def build_messages(task: str, history: list, message: str) -> list:
-    """OpenAI-style message list for tokenizer.apply_chat_template."""
+def build_messages(task: str, history: list, message: str,
+                   context: str = "") -> list:
+    """OpenAI-style message list for tokenizer.apply_chat_template.
+
+    `context` is generation-only material (for example a recorded deepfake
+    verdict the base model must explain). It never reaches the router.
+    """
     system = SYSTEM_BY_TASK.get(task, GENERAL_SYSTEM)
     msgs = [{"role": "system", "content": system}]
+    if context and context.strip():
+        msgs.append({"role": "system", "content": context.strip()})
     for turn in history[-6:]:
         if isinstance(turn, dict) and turn.get("content"):
             role = turn.get("role", "user")

@@ -580,14 +580,130 @@ class AdapterService:
         yield from self._real_stream(prompt, max_new_tokens, temperature,
                                      repetition_penalty)
 
-    def format_prompt(self, task: str, history: list, message: str) -> str:
+    # -- image-conditioned generation (base model) ---------------------
+    def stream_image_answer(self, task: str, history: list, message: str,
+                            image_bytes: bytes, *, context: str = "",
+                            max_new_tokens: int = 512,
+                            temperature: float = 0.0,
+                            repetition_penalty: float = 1.0,
+                            stub: Optional[bool] = None
+                            ) -> Generator[Dict[str, Any], None, None]:
+        """Answer a question about an attached image on the shared base model.
+
+        Uses InternVL's own supported multimodal interface: one 448px tile
+        (the checkpoint's `min_dynamic_patch=1`) becomes a `<image>` block of
+        `num_image_token` `<IMG_CONTEXT>` slots, passed as `pixel_values` to
+        the model's `generate` together with the usual streamer.
+
+        Requires `select("general")` / `lease("general")` first. The LoRA
+        adapters were trained on text only, so passing pixels to them would
+        feed tokens they never saw.
+        """
+        import io as _io
+
+        from PIL import Image as _Image
+        from transformers import TextIteratorStreamer
+
+        use_stub = (_stub_env() or self._stub_backend) if stub is None else stub
+        if use_stub or self.residency.runner() is None:
+            if not use_stub:
+                logger.warning("no model resident (select() not called?); stub stream")
+            yield from self._stub_stream(message, max_new_tokens)
+            return
+
+        import torch
+        from deepfake.forensics import build_transform
+
+        tok = self._ensure_tokenizer()
+        model = self.residency.runner()
+        try:
+            img = _Image.open(_io.BytesIO(image_bytes)).convert("RGB")
+            img.load()
+        except Exception:
+            yield {"event": "notice",
+                   "text": "That file doesn't look like an image I can read. "
+                           "Please attach a JPG or PNG and ask again."}
+            return
+
+        messages = build_messages(task, history or [], message, context=context)
+        # InternVL's chat() prefixes the marker; do it here so the tokenizer's
+        # own template decides the surrounding formatting.
+        messages[-1]["content"] = "<image>\n" + str(messages[-1]["content"])
+        text = tok.apply_chat_template(messages, tokenize=False,
+                                       add_generation_prompt=True)
+        num_patches = 1
+        num_tokens = int(getattr(model, "num_image_token", 256))
+        image_block = ("<img>" + "<IMG_CONTEXT>" * (num_tokens * num_patches)
+                       + "</img>")
+        text = text.replace("<image>", image_block, 1)
+
+        pixel_values = build_transform(448)(img).unsqueeze(0).to(model.device)
+        dtype = getattr(model.vision_model, "dtype", None) or torch.float32
+        pixel_values = pixel_values.to(dtype)
+
+        enc = tok(text, return_tensors="pt")
+        input_ids = enc["input_ids"].to(model.device)
+        attention_mask = enc["attention_mask"].to(model.device)
+        if model.img_context_token_id is None:
+            model.img_context_token_id = tok.convert_tokens_to_ids("<IMG_CONTEXT>")
+
+        t0 = time.perf_counter()
+        cancel = threading.Event()
+        streamer = TextIteratorStreamer(tok, skip_prompt=False,
+                                        skip_special_tokens=True)
+        gen_kwargs: Dict[str, Any] = dict(
+            pixel_values=pixel_values, input_ids=input_ids,
+            attention_mask=attention_mask, streamer=streamer,
+            max_new_tokens=max_new_tokens, do_sample=temperature > 0,
+            repetition_penalty=repetition_penalty,
+            eos_token_id=self.eos_ids(), pad_token_id=tok.pad_token_id,
+            stopping_criteria=_stopping_list([_CancelCriteria(cancel)]),
+        )
+        if temperature > 0:
+            gen_kwargs["temperature"] = temperature
+            gen_kwargs["top_p"] = 0.9
+        thread = threading.Thread(
+            target=lambda: self._generate_guarded(model.generate, gen_kwargs,
+                                                  streamer), daemon=True)
+        thread.start()
+        prefill_ms = (time.perf_counter() - t0) * 1000.0
+        per_token: list = []
+        idx = 0
+        prev = time.perf_counter()
+        try:
+            for chunk in streamer:
+                now = time.perf_counter()
+                dt = (now - prev) * 1000.0
+                prev = now
+                per_token.append(dt)
+                yield {"event": "token", "index": idx, "text": chunk,
+                       "latency_ms": round(dt, 3),
+                       "elapsed_ms": round((now - t0) * 1000.0, 3)}
+                idx += 1
+        finally:
+            cancel.set()
+            thread.join(timeout=60)
+        if gen_kwargs.get("_worker_error"):
+            yield {"event": "notice",
+                   "text": "Generation hit an error partway; showing what arrived. "
+                           f"Detail: {gen_kwargs['_worker_error'][:200]}"}
+        total = (time.perf_counter() - t0) * 1000.0
+        decode_ms = max(total - prefill_ms, 0.0)
+        yield {"event": "generation_receipt",
+               **GenerationReceipt(prefill_ms=prefill_ms, decode_ms=decode_ms,
+                                   tokens=idx,
+                                   tok_per_s=idx / max(decode_ms / 1000.0, 1e-9),
+                                   per_token_ms=per_token).to_dict()}
+
+    def format_prompt(self, task: str, history: list, message: str,
+                      context: str = "") -> str:
         """Training-faithful prompt via the base tokenizer's own template.
 
         The adapters were trained under <|im_start|>system framing —
         reproduce it here. Falls back to manual ChatML framing when the
         tokenizer is unavailable (stub mode) or has no template.
         """
-        messages = build_messages(task, history or [], message)
+        messages = build_messages(task, history or [], message, context=context)
         try:
             if self._stub_backend:
                 raise RuntimeError("stub mode: no tokenizer")

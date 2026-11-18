@@ -62,6 +62,38 @@ def serialize(state: Dict[str, Any]) -> str:
                       allow_nan=False)
 
 
+def build_state(message: str, *, assets: Optional[list] = None,
+                active_image_id: Optional[str] = None,
+                last_analysis: Optional[Dict[str, Any]] = None,
+                history: Optional[list] = None) -> Dict[str, Any]:
+    """The five-field runtime state, exactly as the Router archive defines it.
+
+    `assets` entries carry attachment metadata only (id/kind/availability/
+    support); pixels never enter the router's input.
+    """
+    return {
+        "message": message or "",
+        "assets": list(assets or []),
+        "active_image_id": active_image_id,
+        "last_analysis": last_analysis,
+        "history": list(history or []),
+    }
+
+
+def supported_asset_exists(state: Dict[str, Any]) -> bool:
+    """The archive's `input_serializer.supported_asset_exists`."""
+    active = state.get("active_image_id")
+    for asset in state.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        if (asset.get("kind") == "image"
+                and asset.get("availability") == "available"
+                and asset.get("support") == "supported"
+                and (active is None or asset.get("id") == active)):
+            return True
+    return False
+
+
 class LayaGate:
     """Lazy, cached access to the fine-tuned BASE/DEEPFAKE checkpoint."""
 
@@ -105,33 +137,82 @@ class LayaGate:
     def load_error(self) -> Optional[str]:
         return self._load_error
 
+    @property
+    def agent(self):
+        """The loaded SDK agent, or None when the checkpoint is unavailable."""
+        return self._agent if self._ensure() else None
+
+    def budget(self) -> tuple:
+        """(max_len, head_max_len) the checkpoint was trained with."""
+        if not self._ensure():
+            return _MAX_LEN, _HEAD_MAX_LEN
+        cfg = getattr(self._agent, "cfg", {}) or {}
+        return int(cfg.get("max_len", _MAX_LEN)), int(cfg.get("head_max_len", _HEAD_MAX_LEN))
+
+    def state_budget(self) -> int:
+        """Tokens available to the serialized state after the question head.
+
+        Uses the SDK's own `state_room`, so the number is the limit inference
+        enforces, not a guess. Falls back to `max_len - head_max_len`.
+        """
+        max_len, head = self.budget()
+        if not self._ensure() or not self._questions:
+            return max_len - head
+        try:
+            from laya.common import state_room
+            internal = [self._agent._to_internal(q)
+                        for q in self._questions.values()]
+            return min(state_room(self._agent.tok, q, max_len, head)
+                       for q in internal)
+        except Exception as exc:  # pragma: no cover - SDK shape drift
+            logger.warning("state_room unavailable, using max_len-head: %s", exc)
+            return max(1, max_len - head)
+
+    def token_count(self, text: str) -> Optional[int]:
+        """Token length of a serialized state under the checkpoint's tokenizer."""
+        if not self._ensure():
+            return None
+        try:
+            tok = self._agent.tok
+            enc = tok(text, add_special_tokens=False)
+            return len(enc["input_ids"])
+        except Exception as exc:
+            logger.warning("token_count failed: %s", exc)
+            return None
+
     # -- inference -----------------------------------------------------
     def classify(self, message: str, *, image_attached: bool = False,
                  last_analysis: Optional[Dict[str, Any]] = None,
                  history: Optional[list] = None
                  ) -> Optional[Dict[str, Any]]:
-        """Return the trained route for this turn, or None if the gate is down.
-
-        `image_attached` mirrors the archive's asset list: a supported,
-        available image is what makes DEEPFAKE executable at all.
-        """
-        if not self._ensure():
-            return None
+        """Convenience wrapper: text-only state (or one available image)."""
         assets = ([{"id": "active_image", "kind": "image",
                     "availability": "available", "support": "supported"}]
                   if image_attached else [])
-        state = {
-            "message": message or "",
-            "assets": assets,
-            "active_image_id": "active_image" if image_attached else None,
-            "last_analysis": last_analysis,
-            "history": history or [],
-        }
+        state = build_state(message, assets=assets,
+                            active_image_id="active_image" if image_attached else None,
+                            last_analysis=last_analysis, history=history)
+        return self.classify_state(state)
+
+    def classify_state(self, state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Run the fine-tuned checkpoint on a full five-field runtime state.
+
+        Returns the trained route plus the exact serialized input and its token
+        count, so a caller can log what the router actually saw.
+        """
+        if not self._ensure():
+            return None
+        try:
+            payload = serialize(state)
+        except ValueError as exc:
+            self._load_error = f"bad state: {exc}"
+            return None
+        max_len, head_max_len = self.budget()
         t0 = time.perf_counter()
         try:
-            raw = self._agent.predict(serialize(state), self._questions,
-                                      max_len=_MAX_LEN,
-                                      head_max_len=_HEAD_MAX_LEN)
+            raw = self._agent.predict(payload, self._questions,
+                                      max_len=max_len,
+                                      head_max_len=head_max_len)
         except Exception as exc:
             self._load_error = f"predict failed: {type(exc).__name__}: {exc}"
             logger.warning("fine-tuned Laya router predict failed: %s", exc)
@@ -148,4 +229,8 @@ class LayaGate:
             "probabilities": probs,
             "model": raw.get("model", "laya-router"),
             "latency_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+            "input": payload,
+            "input_tokens": self.token_count(payload),
+            "max_len": max_len,
+            "head_max_len": head_max_len,
         }
