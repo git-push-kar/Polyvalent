@@ -82,22 +82,39 @@ is what sends it back to `DEEPFAKE`.
 
 The routing state carries at most one asset: the image attached to this turn,
 or the active image when it arrived within the recent-message window (the
-upload turn plus six transcript entries, about three exchanges). A second
-asset in `assets` flips clear requests to BASE (measured: "do i look real"
-0.989 with one asset, 0.003 with two), so older uploads are not passed.
+upload turn plus six transcript entries, about three exchanges).
 
-When the conversation's history holds an unrelated topic (a description turn,
-for example), a direct authenticity question can still land on BASE. For that
-case the router scores the message once more against the image with empty
-history — the same single-turn state the checkpoint sees on its own — and a
-DEEPFAKE at 0.90 or above promotes the turn. The pass only promotes; it never
-overrides a DEEPFAKE the contextual state already chose.
+When an image was uploaded earlier in the thread without a deepfake check, and a
+subsequent turn asks for verification without re-attaching the image, the router
+consults LAYA under a two-verdict evaluation:
+1. Evaluates the request without an image (as standalone text).
+2. Evaluates the request with the recent image attached.
 
-That exchange is not replayed raw into routing history: the checkpoint reads a
-prior authenticity request as work still pending, so a greeting after a verdict
-re-fired DEEPFAKE. `last_analysis` already carries the result, so the routing
-view substitutes one neutral completion line for the forensics turn. Generation
-history keeps the full transcript.
+If LAYA selects DEEPFAKE with the recent image present (while returning BASE
+without it), the router recognizes the reference to the recent image, routes to
+DEEPFAKE, and executes the deepfake forensic pipeline on that image. Conversely,
+ordinary visual questions, greetings, or questions explaining a recorded verdict
+keep BASE.
+
+Because LAYA was fine-tuned on single messages and asset availability, routing
+context sends `history: []` to LAYA to prevent cross-turn transcript pollution.
+Generation context maintains the full persistent transcript.
+
+### Multi-Face YOLO Detection & Context Cropping Pipeline
+
+When an authenticity check (`DEEPFAKE`) runs on an uploaded image, the system
+executes the YOLO multi-face pipeline (`deepfake/face_detect.py`, `models/yolov8n-face.pt`):
+
+1. **Detection**: YOLO face detector identifies all face bounding boxes (letterbox 640, conf ≥ 0.25, NMS 0.50).
+2. **Routing Contract**:
+   - **Passthrough (Lone Portrait Face)**: If exactly 1 face is detected and covers ≥ 5% (0.05) of the frame area, it takes the untouched whole-image path (`inference.py` parity).
+   - **Multi-Crop (`per_face`)**: If ≥ 2 faces are detected (or a lone face occupying < 5% of a wide scene), each face ≥ 96 px is cropped with a **30% background context ring** (`margin=0.30`) and squared. This retains hairline/jaw/neck blending seams and avoids synthetic texture.
+   - **Fallback (`no_face`)**: If 0 faces are detected, the whole image is evaluated and flagged `faces_detected: 0`.
+3. **Batched Classification & Telemetry**: Each face crop is preprocessed (448px visual tokens + 224px 2D FFT spectrum) and passed through the classifier head, computing per-face probabilities, confidences, attention hotspots, and spectral ratios.
+4. **Threat Aggregation & Reasoning**:
+   - Aggregation uses worst-case `max(p_fake)`: a single forged face renders the document `FAKE`.
+   - The primary suspicious face (highest `p_fake`) is selected for in-depth, grounded LLM reasoning (`<fast>`, `<planning>`, `<reasoning>`, `<reflection>`, `<conclusion>`, `<answer>`).
+5. **Persistence**: The full multi-face breakdown (`faces_detected`, `faces_analyzed`, per-face boxes and scores) is recorded in `Analysis` and included in SSE `verdict` and `analysis_saved` events, so subsequent follow-ups to BASE accurately reflect all evaluated faces.
 
 The anomaly endpoint (`/anomaly/reason`) and the research endpoint
 (`/route/laya/predict`) keep the four-way zero-shot `LayaRouter`

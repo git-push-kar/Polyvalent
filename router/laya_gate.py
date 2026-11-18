@@ -102,7 +102,7 @@ class LayaGate:
         self._agent = None
         self._questions: Optional[Dict[str, Any]] = None
         self._load_error: Optional[str] = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     # -- lifecycle -----------------------------------------------------
     def _ensure(self) -> bool:
@@ -209,14 +209,15 @@ class LayaGate:
             return None
         max_len, head_max_len = self.budget()
         t0 = time.perf_counter()
-        try:
-            raw = self._agent.predict(payload, self._questions,
-                                      max_len=max_len,
-                                      head_max_len=head_max_len)
-        except Exception as exc:
-            self._load_error = f"predict failed: {type(exc).__name__}: {exc}"
-            logger.warning("fine-tuned Laya router predict failed: %s", exc)
-            return None
+        with self._lock:
+            try:
+                raw = self._agent.predict(payload, self._questions,
+                                          max_len=max_len,
+                                          head_max_len=head_max_len)
+            except Exception as exc:
+                self._load_error = f"predict failed: {type(exc).__name__}: {exc}"
+                logger.warning("fine-tuned Laya router predict failed: %s", exc)
+                return None
         answer = ((raw.get("answers") or {}).get("route") or {})
         choice = str(answer.get("choice") or "BASE").upper()
         probs = answer.get("probabilities") or {}

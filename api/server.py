@@ -490,10 +490,9 @@ def _routing_trace(decision) -> Dict[str, Any]:
             "output": extra.get("gate"),
             "input_tokens": extra.get("input_tokens"),
             "input_budget": extra.get("input_budget"),
-            "history_turns": extra.get("history_turns"),
-            "history_dropped": extra.get("history_dropped"),
-            "promotion": extra.get("promotion"),
-            "single_turn": extra.get("single_turn_gate")}
+            "history_turns": extra.get("history_turns", 0),
+            "history_dropped": extra.get("history_dropped", 0),
+            "two_verdict": extra.get("two_verdict")}
 
 
 def _chat_stream(req: ChatRequest):
@@ -509,6 +508,9 @@ def _chat_stream(req: ChatRequest):
         conv.seed_history(req.history)
 
     # -- attachments become trusted, server-side assets -----------------
+    attached_asset = None
+    attached_now = False
+
     if req.image_base64:
         try:
             raw = base64.b64decode(req.image_base64)
@@ -516,22 +518,19 @@ def _chat_stream(req: ChatRequest):
             raw = b""
         asset_id = (req.image_ids[0] if req.image_ids
                     else req.active_image_id)
-        asset = store.add_image(conversation_id, asset_id, raw,
-                                media_type=req.media_type or "")
-        if req.active_image_id:
-            store.set_active_image(conversation_id, req.active_image_id)
-        attachment = {"id": asset.id, "availability": asset.availability,
-                      "support": asset.support, "detail": asset.detail}
+        attached_asset = store.add_image(conversation_id, asset_id, raw,
+                                         media_type=req.media_type or "")
+        attached_now = True
+        store.set_active_image(conversation_id, attached_asset.id)
     elif req.image_ids or req.active_image_id:
         wanted = req.active_image_id or req.image_ids[0]
         store.set_active_image(conversation_id, wanted)
-        asset = conv.active_asset()
-        attachment = ({"id": asset.id, "availability": asset.availability,
-                       "support": asset.support, "detail": asset.detail}
-                      if asset else None)
-    else:
-        asset = conv.active_asset()
-        attachment = None
+        attached_asset = conv.assets.get(wanted)
+        attached_now = bool(attached_asset and attached_asset.usable)
+
+    attachment = ({"id": attached_asset.id, "availability": attached_asset.availability,
+                   "support": attached_asset.support, "detail": attached_asset.detail}
+                  if attached_asset else None)
 
     # -- routing: LAYA's five-field state, or the explicit thinking pin --
     if req.deep_thinking:
@@ -543,7 +542,8 @@ def _chat_stream(req: ChatRequest):
     else:
         state = store.routing_payload(
             conversation_id, req.message,
-            attached_now=bool(req.image_base64 or req.image_ids))
+            attached_asset=attached_asset,
+            attached_now=attached_now)
         decision = _route_trained(state)
 
     log_record: Dict[str, Any] = {
@@ -564,11 +564,14 @@ def _chat_stream(req: ChatRequest):
         decision.abstained = False
     task = decision.task
 
-    # DEEPFAKE is executable only for an available, supported image. The
-    # router checks this too; this is the second, independent guard so no
-    # code path can load the 6 GB pipeline without pixels it can read.
-    if task == "deepfake" and not (asset and asset.usable):
-        detail = asset.detail if asset else "no image attached"
+    # DEEPFAKE is executable only for an available, supported image.
+    target_asset = (
+        attached_asset if (attached_now and attached_asset and attached_asset.usable)
+        else conv.recent_asset()
+    )
+
+    if task == "deepfake" and not (target_asset and target_asset.usable):
+        detail = target_asset.detail if target_asset else "no image attached"
         store.add_turn(conversation_id, "user", req.message)
         yield _sse({"event": "route", "task": "general",
                     "label": TASK_LABELS["general"],
@@ -582,22 +585,41 @@ def _chat_stream(req: ChatRequest):
         yield _sse({"event": "done"})
         return
 
+    if task == "deepfake" and target_asset:
+        conv.active_image_id = target_asset.id
+
     yield _sse({"event": "route", "task": task,
                 "label": TASK_LABELS.get(task, task),
                 "reason": decision.reason})
 
     # -- generation context (separate from the routing view) ------------
-    image_id = conv.active_image_id if asset is not None else None
-    ctx = store.generation_context(conversation_id, image_id=image_id)
+    ctx = store.generation_context(conversation_id, image_id=conv.active_image_id, message=req.message)
     history_turns = ctx["history"]
     analysis = ctx["analysis"]
     analysis_block = ctx["analysis_block"]
-    # A recorded verdict is explained from the record. Passing the pixels
-    # again would invite a second, invented forensic read of the same image.
-    attach_pixels = bool(asset and asset.usable and not analysis_block)
+    is_verdict_followup = ctx["is_verdict_followup"]
+
+    # When answering an ordinary visual question, retrieve and pass the actual
+    # image pixels through the base model's supported multimodal interface.
+    # When explaining a recorded verdict, supply recorded analysis without
+    # inviting a second invented visual forensic read.
+    if task == "general":
+        if attached_now and attached_asset and attached_asset.usable:
+            attach_pixels = True
+            pixel_bytes = attached_asset.data
+        elif conv.recent_asset() and not is_verdict_followup:
+            attach_pixels = True
+            pixel_bytes = conv.recent_asset().data
+        else:
+            attach_pixels = False
+            pixel_bytes = None
+    else:
+        attach_pixels = False
+        pixel_bytes = None
+
     yield _sse({"event": "context", "history_turns": len(history_turns),
                 "analysis_id": analysis.id if analysis else None,
-                "image_id": (image_id
+                "image_id": (conv.active_image_id
                              if (attach_pixels or task == "deepfake") else None),
                 "analysis_supplied": bool(analysis_block)})
 
@@ -612,7 +634,7 @@ def _chat_stream(req: ChatRequest):
                 verdict: Dict[str, Any] = {}
                 visible: List[str] = []
                 for chunk in service.analyze_image_stream(
-                        asset.data,
+                        target_asset.data,
                         max_new_tokens=req.max_new_tokens,
                         temperature=req.temperature,
                         repetition_penalty=req.repetition_penalty,
@@ -632,26 +654,32 @@ def _chat_stream(req: ChatRequest):
                 explanation = "".join(visible).strip()
                 result = Analysis(
                     id=f"an_{len(conv.analyses) + 1}",
-                    image_id=asset.id,
+                    image_id=target_asset.id,
                     verdict=str(verdict.get("verdict") or "UNKNOWN"),
                     confidence=float(verdict.get("confidence") or 0.0),
                     hotspots=str(verdict.get("hotspots") or ""),
                     spectral=str(verdict.get("spectral") or ""),
                     explanation=explanation,
-                    model="deepfake-wrapper")
+                    model="deepfake-wrapper",
+                    faces_detected=int(verdict.get("faces_detected", 1)),
+                    faces_analyzed=int(verdict.get("faces_analyzed", 1)),
+                    routing_path=str(verdict.get("routing_path", "passthrough")),
+                    faces=list(verdict.get("faces", [])),
+                )
                 store.record_analysis(conversation_id, result)
                 answer_parts.append(result.history_text())
                 log_record["analysis_id"] = result.id
                 yield _sse({"event": "analysis_saved", "analysis_id": result.id,
                             "image_id": result.image_id,
                             "verdict": result.verdict,
-                            "confidence": result.confidence})
+                            "confidence": result.confidence,
+                            "faces_analyzed": result.faces_analyzed})
             else:
                 prompt_message = (clean_adapter_directive(req.message)
                                   if task == "reasoning" else req.message)
-                if attach_pixels:
+                if attach_pixels and pixel_bytes:
                     stream = service.stream_image_answer(
-                        "general", history_turns, prompt_message, asset.data,
+                        "general", history_turns, prompt_message, pixel_bytes,
                         context=analysis_block,
                         max_new_tokens=req.max_new_tokens,
                         temperature=req.temperature,
@@ -683,9 +711,7 @@ def _chat_stream(req: ChatRequest):
         yield _sse({"event": "done"})
         return
 
-    # One persistent transcript, updated only after the answer exists. A
-    # forensics exchange is marked so the routing view can replace it with the
-    # saved analysis instead of replaying the raw request and report.
+    # One persistent transcript, updated only after the answer exists.
     turn_kind = "analysis" if task == "deepfake" else "chat"
     store.add_turn(conversation_id, "user", req.message, kind=turn_kind)
     answer = "".join(answer_parts).strip()

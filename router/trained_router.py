@@ -9,13 +9,14 @@ are kept exactly as trained:
   BASE      answer with the shared base model (no specialist adapter)
   DEEPFAKE  run the deepfake forensic pipeline on the active image
 
-There are no keyword cues, no modality short-circuits and no preset replies
+There are no keyword rules, no modality short-circuits and no preset replies
 here: if the checkpoint cannot answer, the turn goes to BASE with an explicit
 `gate-unavailable` reason rather than an invented specialist choice.
 
-DEEPFAKE is only *executable* when the active asset is available and supported
-(Router's `supported_asset_exists` contract). The four-route zero-shot router
-stays in `LayaRouter`, where the anomaly endpoint still uses it.
+DEEPFAKE is only executable when the active asset is available and supported.
+For turns where an image is in recent chat but not attached directly to the current
+request, a two-verdict mechanism evaluates the request both without and with
+the recent image to detect when the user is referencing that image for verification.
 """
 from __future__ import annotations
 
@@ -25,198 +26,9 @@ from typing import Any, Dict, Optional
 from .base import BaseRouter, RouterDecision
 from .laya_gate import LayaGate, build_state, serialize, supported_asset_exists
 
-# How many of the newest turns a routing view may consider. The checkpoint was
-# trained with short history; the newest request is always kept in full.
-_MAX_HISTORY_TURNS = 6
-_MAX_TURN_CHARS = 700
-# A single-turn pass may overrule BASE only on an unambiguous DEEPFAKE.
-_SINGLE_TURN_FLOOR = 0.90
-# Re-running forensics on an image that is not attached is a bigger commitment
-# than answering from the saved analysis, so the contextual pass must be
-# near-certain. Measured on the same thread: "check it again" 0.992,
-# "is this real or fake" 0.994, greeting 0.64-0.86.
-_UNATTACHED_FLOOR = 0.95
-
-
-class TrainedLayaRouter(BaseRouter):
-    """The application's primary router: the fine-tuned BASE/DEEPFAKE head."""
-
-    name = "laya-finetuned"
-
-    def __init__(self, gate: Optional[LayaGate] = None) -> None:
-        self._gate = gate or LayaGate()
-
-    # -- lifecycle ------------------------------------------------------
-    @property
-    def gate(self) -> LayaGate:
-        return self._gate
-
-    # -- routing --------------------------------------------------------
-    def route(self, payload: Dict[str, Any]) -> RouterDecision:
-        t0 = time.perf_counter()
-        steps: Dict[str, float] = {}
-
-        message = str(payload.get("message") or payload.get("text") or "")
-        with _clock(steps, "state"):
-            state = build_state(
-                message,
-                assets=_assets(payload),
-                active_image_id=payload.get("active_image_id"),
-                last_analysis=payload.get("last_analysis"),
-                history=_routing_history(payload.get("history")),
-            )
-
-        with _clock(steps, "gate_load"):
-            available = self._gate.available()
-
-        if not available:
-            return self._base_decision(
-                t0, steps, confidence=0.0,
-                reason=f"gate-unavailable:{self._gate.load_error or 'no checkpoint'}",
-                extra={"gate": None, "gate_error": self._gate.load_error})
-
-        with _clock(steps, "gate_trim"):
-            state, dropped, tokens = self._fit(state)
-
-        with _clock(steps, "gate_forward"):
-            gate = self._gate.classify_state(state)
-
-        if gate is None:
-            return self._base_decision(
-                t0, steps, confidence=0.0,
-                reason=f"gate-unavailable:{self._gate.load_error or 'predict failed'}",
-                extra={"gate": None, "gate_error": self._gate.load_error,
-                       "routing_input": state, "input_tokens": tokens})
-
-        extra = {"gate": {k: v for k, v in gate.items() if k != "input"},
-                 "router_input": gate.get("input"),
-                 "input_tokens": gate.get("input_tokens"),
-                 "input_budget": self._gate.state_budget(),
-                 "history_turns": len(state["history"]),
-                 "history_dropped": dropped,
-                 "assets": state["assets"],
-                 "active_image_id": state["active_image_id"],
-                 "last_analysis": state["last_analysis"]}
-
-        promoted = None
-        if gate["route"] == "BASE":
-            # History can hold the conversation on the previous topic (a
-            # description turn keeps "do i look real" on BASE even with the
-            # image present). The same message scored on the image alone is
-            # the checkpoint's own view of the request, so a confident
-            # DEEPFAKE there wins. This only promotes; it never demotes.
-            promoted = self._single_turn(payload, steps)
-            if promoted is not None:
-                gate = promoted["gate"]
-                extra["gate"] = {k: v for k, v in gate.items() if k != "input"}
-                extra["router_input"] = gate.get("input")
-                extra["input_tokens"] = gate.get("input_tokens")
-                extra["single_turn_gate"] = promoted["view"]
-                extra["promotion"] = promoted["reason"]
-
-        if (gate["route"] == "DEEPFAKE" and promoted is None
-                and not payload.get("attached_now")
-                and float(gate["probability"]) < _UNATTACHED_FLOOR):
-            # An image from earlier in the thread, a message that is not an
-            # explicit request: answer from the saved state rather than
-            # loading the pipeline on a history-inflated signal.
-            extra["suppressed_deepfake"] = gate["probability"]
-            extra["base_reason"] = "gate:deepfake-below-unattached-floor"
-            gate = {**gate, "route": "BASE",
-                    "probability": round(1.0 - float(gate["probability"]), 4)}
-            extra["gate"] = {k: v for k, v in gate.items() if k != "input"}
-
-        if gate["route"] == "DEEPFAKE":
-            if not supported_asset_exists(state):
-                # The head asked for forensics, but there is no executable
-                # image attached: answer with the base model instead of
-                # pretending (or loading a 6 GB pipeline for nothing).
-                return self._base_decision(
-                    t0, steps, confidence=float(gate["probability"]),
-                    reason="gate:deepfake-no-supported-image",
-                    extra={**extra, "gate_wanted": "DEEPFAKE"})
-            return RouterDecision(
-                router=self.name, task="deepfake",
-                confidence=float(gate["probability"]),
-                reason=str(extra.get("promotion") or "gate:finetuned-deepfake"),
-                latency_ms=(time.perf_counter() - t0) * 1000.0,
-                steps=steps, abstained=False, extra=extra)
-
-        return RouterDecision(
-            router=self.name, task="general",
-            confidence=float(gate["probability"]),
-            reason=str(extra.pop("base_reason", "gate:finetuned-base")),
-            latency_ms=(time.perf_counter() - t0) * 1000.0,
-            steps=steps, abstained=False, extra=extra)
-
-    # -- internals ------------------------------------------------------
-    def routing_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """The exact state that would be sent to the checkpoint (for traces)."""
-        return build_state(
-            str(payload.get("message") or payload.get("text") or ""),
-            assets=_assets(payload),
-            active_image_id=payload.get("active_image_id"),
-            last_analysis=payload.get("last_analysis"),
-            history=_routing_history(payload.get("history")),
-        )
-
-    def _single_turn(self, payload: Dict[str, Any],
-                     steps: Dict[str, float]) -> Optional[Dict[str, Any]]:
-        """Score the message against the image with no history, if one is near.
-
-        Runs only when the image is attached to this request or arrived within
-        the recent-message window, so an old image cannot resurrect DEEPFAKE.
-        """
-        if not (payload.get("attached_now") or payload.get("recent_image_id")):
-            return None
-        state = build_state(
-            str(payload.get("message") or payload.get("text") or ""),
-            assets=_assets(payload),
-            active_image_id=payload.get("active_image_id"),
-            last_analysis=payload.get("last_analysis"),
-            history=[],
-        )
-        if not supported_asset_exists(state):
-            return None
-        state, dropped, tokens = self._fit(state)
-        with _clock(steps, "gate_single_turn"):
-            gate = self._gate.classify_state(state)
-        if gate is None or gate["route"] != "DEEPFAKE":
-            return None
-        if float(gate["probability"]) < _SINGLE_TURN_FLOOR:
-            return None
-        return {
-            "gate": gate,
-            "view": {k: v for k, v in gate.items() if k != "input"},
-            "reason": "gate:single-turn-deepfake",
-        }
-
-    def _fit(self, state: Dict[str, Any]) -> tuple:
-        """Drop oldest turns until the state fits; return (state, dropped, tokens).
-
-        The message is never trimmed: `serialize` puts it first, so any residual
-        overflow is LAYA's own tail truncation of history, never the request.
-        """
-        budget = self._gate.state_budget()
-        dropped = 0
-        tokens = self._gate.token_count(serialize(state))
-        while (tokens is not None and tokens > budget and state["history"]):
-            state["history"].pop(0)
-            dropped += 1
-            tokens = self._gate.token_count(serialize(state))
-        return state, dropped, tokens
-
-    def _base_decision(self, t0: float, steps: Dict[str, float], *,
-                       confidence: float, reason: str,
-                       extra: Dict[str, Any]) -> RouterDecision:
-        return RouterDecision(
-            router=self.name, task="general", confidence=confidence,
-            reason=reason, latency_ms=(time.perf_counter() - t0) * 1000.0,
-            steps=steps, abstained=False, extra=extra)
-
 
 class _clock:
-    """Tiny per-step stopwatch matching the existing RouterDecision.steps."""
+    """Tiny per-step stopwatch matching RouterDecision.steps."""
 
     def __init__(self, sink: Dict[str, float], name: str) -> None:
         self._sink = sink
@@ -234,22 +46,281 @@ class _clock:
         self._sink[self._name] = seconds * 1000.0
 
 
-def _assets(payload: Dict[str, Any]) -> list:
-    assets = payload.get("assets")
-    if isinstance(assets, list):
-        return [a for a in assets if isinstance(a, dict)]
-    # Back-compat: an id-only attachment list still routes, as unavailable.
-    ids = payload.get("image_ids") or []
-    return [{"id": str(i), "kind": "image", "availability": "missing",
-             "support": "unsupported"} for i in ids if i]
+def _extract_asset_view(asset: Any) -> Optional[Dict[str, Any]]:
+    if asset is None:
+        return None
+    if hasattr(asset, "routing_view"):
+        return asset.routing_view()
+    if isinstance(asset, dict):
+        return {
+            "id": str(asset.get("id") or ""),
+            "kind": str(asset.get("kind") or "image"),
+            "availability": str(asset.get("availability") or "available"),
+            "support": str(asset.get("support") or "supported"),
+        }
+    return None
 
 
-def _routing_history(history: Any) -> list:
-    if not isinstance(history, list):
-        return []
-    turns = []
-    for turn in history[-_MAX_HISTORY_TURNS:]:
-        if isinstance(turn, dict) and turn.get("content"):
-            turns.append({"role": str(turn.get("role", "user")),
-                          "content": str(turn["content"])[:_MAX_TURN_CHARS]})
-    return turns
+def _is_usable(asset: Any) -> bool:
+    if asset is None:
+        return False
+    if hasattr(asset, "usable"):
+        return bool(asset.usable)
+    if isinstance(asset, dict):
+        return (
+            asset.get("availability") == "available"
+            and asset.get("support") == "supported"
+        )
+    return False
+
+
+def _get_id(asset: Any) -> Optional[str]:
+    if asset is None:
+        return None
+    if hasattr(asset, "id"):
+        return asset.id
+    if isinstance(asset, dict):
+        return asset.get("id")
+    return None
+
+
+class TrainedLayaRouter(BaseRouter):
+    """The application's primary router: the fine-tuned BASE/DEEPFAKE head."""
+
+    name = "laya-finetuned"
+
+    def __init__(self, gate: Optional[LayaGate] = None) -> None:
+        self._gate = gate or LayaGate()
+
+    @property
+    def gate(self) -> LayaGate:
+        return self._gate
+
+    def route(self, payload: Dict[str, Any]) -> RouterDecision:
+        t0 = time.perf_counter()
+        steps: Dict[str, float] = {}
+
+        message = str(payload.get("message") or payload.get("text") or "").strip()
+
+        with _clock(steps, "gate_load"):
+            available = self._gate.available()
+
+        if not available:
+            return self._base_decision(
+                t0, steps, confidence=0.0,
+                reason=f"gate-unavailable:{self._gate.load_error or 'no checkpoint'}",
+                extra={"gate": None, "gate_error": self._gate.load_error}
+            )
+
+        attached_now = bool(payload.get("attached_now"))
+        attached_asset = payload.get("attached_asset")
+        recent_asset = payload.get("recent_asset")
+        active_image_id = payload.get("active_image_id")
+        last_analysis = payload.get("last_analysis")
+
+        # Backwards compatibility: if attached_asset was not passed directly, look in assets list
+        if attached_asset is None and isinstance(payload.get("assets"), list):
+            for a in payload["assets"]:
+                if isinstance(a, dict) and a.get("kind") == "image":
+                    if active_image_id is None or a.get("id") == active_image_id:
+                        attached_asset = a
+                        if "attached_now" not in payload:
+                            attached_now = True
+                        break
+
+        has_attached = bool(attached_now and attached_asset and _is_usable(attached_asset))
+        has_recent = bool(recent_asset and _is_usable(recent_asset))
+
+        # ------------------------------------------------------------------
+        # CASE 1: Image is attached directly to the current request
+        # ------------------------------------------------------------------
+        if has_attached:
+            asset_view = _extract_asset_view(attached_asset)
+            asset_id = _get_id(attached_asset) or active_image_id
+
+            with _clock(steps, "gate_forward"):
+                state = build_state(
+                    message=message,
+                    assets=[asset_view] if asset_view else [],
+                    active_image_id=asset_id,
+                    last_analysis=last_analysis,
+                    history=[],
+                )
+                gate_res = self._gate.classify_state(state)
+
+            if gate_res is None:
+                return self._base_decision(
+                    t0, steps, confidence=0.0,
+                    reason=f"gate-unavailable:{self._gate.load_error or 'predict failed'}",
+                    extra={"gate": None, "gate_error": self._gate.load_error, "router_input": state}
+                )
+
+            extra = {
+                "gate": {k: v for k, v in gate_res.items() if k != "input"},
+                "router_input": gate_res.get("input"),
+                "input_tokens": gate_res.get("input_tokens"),
+                "input_budget": self._gate.state_budget(),
+                "assets": state["assets"],
+                "active_image_id": asset_id,
+                "last_analysis": last_analysis,
+                "attached_now": True,
+            }
+
+            if gate_res["route"] == "DEEPFAKE":
+                if not supported_asset_exists(state):
+                    return self._base_decision(
+                        t0, steps, confidence=float(gate_res["probability"]),
+                        reason="gate:deepfake-no-supported-image",
+                        extra={**extra, "gate_wanted": "DEEPFAKE"}
+                    )
+                return RouterDecision(
+                    router=self.name, task="deepfake",
+                    confidence=float(gate_res["probability"]),
+                    reason="gate:finetuned-deepfake",
+                    latency_ms=(time.perf_counter() - t0) * 1000.0,
+                    steps=steps, abstained=False, extra=extra
+                )
+            else:
+                return RouterDecision(
+                    router=self.name, task="general",
+                    confidence=float(gate_res["probability"]),
+                    reason="gate:finetuned-base",
+                    latency_ms=(time.perf_counter() - t0) * 1000.0,
+                    steps=steps, abstained=False, extra=extra
+                )
+
+        # ------------------------------------------------------------------
+        # CASE 2: No image attached now, and NO image in recent chat
+        # ------------------------------------------------------------------
+        if not has_recent:
+            with _clock(steps, "gate_forward"):
+                state = build_state(
+                    message=message,
+                    assets=[],
+                    active_image_id=None,
+                    last_analysis=None,
+                    history=[],
+                )
+                gate_res = self._gate.classify_state(state)
+
+            if gate_res is None:
+                return self._base_decision(
+                    t0, steps, confidence=0.0,
+                    reason=f"gate-unavailable:{self._gate.load_error or 'predict failed'}",
+                    extra={"gate": None, "gate_error": self._gate.load_error, "router_input": state}
+                )
+
+            extra = {
+                "gate": {k: v for k, v in gate_res.items() if k != "input"},
+                "router_input": gate_res.get("input"),
+                "input_tokens": gate_res.get("input_tokens"),
+                "input_budget": self._gate.state_budget(),
+                "assets": [],
+                "active_image_id": None,
+                "last_analysis": None,
+                "attached_now": False,
+            }
+
+            if gate_res["route"] == "DEEPFAKE":
+                return RouterDecision(
+                    router=self.name, task="deepfake",
+                    confidence=float(gate_res["probability"]),
+                    reason="gate:finetuned-deepfake-no-image",
+                    latency_ms=(time.perf_counter() - t0) * 1000.0,
+                    steps=steps, abstained=False, extra=extra
+                )
+            else:
+                return RouterDecision(
+                    router=self.name, task="general",
+                    confidence=float(gate_res["probability"]),
+                    reason="gate:finetuned-base",
+                    latency_ms=(time.perf_counter() - t0) * 1000.0,
+                    steps=steps, abstained=False, extra=extra
+                )
+
+        # ------------------------------------------------------------------
+        # CASE 3: No image attached now, BUT there is a usable recent image.
+        # Two-Verdict Mechanism:
+        # 1. Query LAYA without image (as current turn looks standalone).
+        # 2. Query LAYA with recent image (as if user references that image).
+        # ------------------------------------------------------------------
+        recent_view = _extract_asset_view(recent_asset)
+        recent_id = _get_id(recent_asset) or active_image_id
+
+        with _clock(steps, "gate_forward_no_img"):
+            state_no = build_state(
+                message=message,
+                assets=[],
+                active_image_id=None,
+                last_analysis=None,
+                history=[],
+            )
+            v_no = self._gate.classify_state(state_no)
+
+        with _clock(steps, "gate_forward_with_img"):
+            state_with = build_state(
+                message=message,
+                assets=[recent_view] if recent_view else [],
+                active_image_id=recent_id,
+                last_analysis=last_analysis,
+                history=[],
+            )
+            v_with = self._gate.classify_state(state_with)
+
+        if v_with is None and v_no is None:
+            return self._base_decision(
+                t0, steps, confidence=0.0,
+                reason=f"gate-unavailable:{self._gate.load_error or 'predict failed'}",
+                extra={"gate": None, "gate_error": self._gate.load_error}
+            )
+
+        active_gate = v_with or v_no
+        two_verdicts = {
+            "without_image": {k: v for k, v in v_no.items() if k != "input"} if v_no else None,
+            "with_image": {k: v for k, v in v_with.items() if k != "input"} if v_with else None,
+        }
+
+        extra = {
+            "gate": {k: v for k, v in active_gate.items() if k != "input"},
+            "router_input": active_gate.get("input"),
+            "input_tokens": active_gate.get("input_tokens"),
+            "input_budget": self._gate.state_budget(),
+            "two_verdict": two_verdicts,
+            "assets": state_with["assets"],
+            "active_image_id": recent_id,
+            "last_analysis": last_analysis,
+            "attached_now": False,
+            "recent_image_id": recent_id,
+        }
+
+        # If v_with clearly selects DEEPFAKE: the request asks for authenticity verification
+        # and references the image from the recent chat.
+        if v_with and v_with["route"] == "DEEPFAKE" and float(v_with.get("probability", 0.0)) >= 0.50:
+            extra["resolved_via"] = "two_verdict_deepfake"
+            return RouterDecision(
+                router=self.name, task="deepfake",
+                confidence=float(v_with["probability"]),
+                reason="gate:two-verdict-deepfake-recent-image",
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+                steps=steps, abstained=False, extra=extra
+            )
+
+        # Otherwise, even in the presence of the recent image, the request is BASE
+        # (e.g. "Explain that verdict", "Describe what he is wearing", "What is the weather?")
+        conf = float(v_with["probability"]) if v_with else (float(v_no["probability"]) if v_no else 1.0)
+        return RouterDecision(
+            router=self.name, task="general",
+            confidence=conf,
+            reason="gate:finetuned-base",
+            latency_ms=(time.perf_counter() - t0) * 1000.0,
+            steps=steps, abstained=False, extra=extra
+        )
+
+    def _base_decision(self, t0: float, steps: Dict[str, float], *,
+                       confidence: float, reason: str,
+                       extra: Dict[str, Any]) -> RouterDecision:
+        return RouterDecision(
+            router=self.name, task="general", confidence=confidence,
+            reason=reason, latency_ms=(time.perf_counter() - t0) * 1000.0,
+            steps=steps, abstained=False, extra=extra
+        )

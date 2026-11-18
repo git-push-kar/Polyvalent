@@ -29,15 +29,24 @@ from typing import Any, Dict, List, Optional
 
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 SUPPORTED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP", "BMP"}
-# A routing turn is a pointer to what was said, not a transcript: the router
-# has a 512-token budget and the newest message must survive intact.
 ROUTING_TURN_CHARS = 700
 ROUTING_HISTORY_TURNS = 6
 GENERATION_HISTORY_TURNS = 6
-# How far back an image still counts as "in the recent messages" for the
-# single-turn routing pass: the upload turn plus the next six transcript
-# entries (about three user/assistant exchanges).
 RECENT_IMAGE_TURNS = 6
+
+_VERDICT_FOLLOWUP_WORDS = (
+    "verdict", "analysis", "forensic", "result", "score", "confidence",
+    "why fake", "why real", "why is it fake", "why is it real",
+    "why did you say", "explain that", "explain why", "explain the",
+    "evidence", "hotspot", "spectral", "findings", "how do you know",
+    "reason for", "what makes you say", "how did you classify",
+)
+
+
+def is_verdict_question(message: str) -> bool:
+    """True if message asks to explain or discuss a recorded forensic verdict."""
+    low = (message or "").lower()
+    return any(w in low for w in _VERDICT_FOLLOWUP_WORDS)
 
 
 @dataclass
@@ -57,12 +66,16 @@ class Asset:
 
     def routing_view(self) -> Dict[str, Any]:
         """Exactly the asset shape the Router repository trained on."""
-        return {"id": self.id, "kind": self.kind,
-                "availability": self.availability, "support": self.support}
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "availability": self.availability,
+            "support": self.support,
+        }
 
     @property
     def usable(self) -> bool:
-        return self.availability == "available" and self.support == "supported"
+        return self.availability == "available" and self.support == "supported" and len(self.data) > 0
 
 
 @dataclass
@@ -78,24 +91,32 @@ class Analysis:
     explanation: str = ""
     model: str = "deepfake-wrapper"
     created_at: float = field(default_factory=time.time)
+    faces_detected: int = 1
+    faces_analyzed: int = 1
+    routing_path: str = "passthrough"
+    faces: List[Dict[str, Any]] = field(default_factory=list)
 
     def routing_view(self) -> Dict[str, Any]:
         """`last_analysis` in the Router archive's exact field structure.
 
         The reviewed training rows use four keys only:
-        `{asset_id, confidence, evidence_summary, verdict}`. The long prose
-        stays out of the router's input; the generation context carries it.
+        `{asset_id, confidence, evidence_summary, verdict}`.
         """
         summary: List[str] = []
+        if self.faces_analyzed > 1:
+            summary.append(f"Faces: {self.faces_analyzed} evaluated")
         if self.hotspots:
             summary.append(f"Hotspots: {self.hotspots[:160]}")
         if self.spectral:
             summary.append(f"Spectral: {self.spectral[:160]}")
         if self.explanation.strip():
             summary.append(f"Explanation: {self.explanation.strip()[:240]}")
-        return {"asset_id": self.image_id, "verdict": self.verdict,
-                "confidence": round(float(self.confidence), 4),
-                "evidence_summary": summary}
+        return {
+            "asset_id": self.image_id,
+            "verdict": self.verdict,
+            "confidence": round(float(self.confidence), 4),
+            "evidence_summary": summary,
+        }
 
     def generation_block(self) -> str:
         """What BASE is told about a verdict it must explain, not re-derive."""
@@ -104,21 +125,31 @@ class Analysis:
             f"image: {self.image_id}",
             f"verdict: {self.verdict}",
             f"classifier confidence: {self.confidence:.4f}",
+        ]
+        if self.faces_analyzed > 1:
+            lines.append(
+                f"faces evaluated: {self.faces_analyzed} detected in image (primary face analyzed: #{self.faces[0].get('face_id', 1) if self.faces else 1})"
+            )
+        lines.extend([
             f"hotspot regions: {self.hotspots or 'not reported'}",
             f"spectral note: {self.spectral or 'not reported'}",
-        ]
+        ])
         if self.explanation.strip():
             lines.append(f"explanation: {self.explanation.strip()[:900]}")
-        lines.append("Use ONLY these recorded findings; do not claim new "
-                     "measurements or new forensic evidence.")
+        lines.append(
+            "Use ONLY these recorded findings; do not claim new measurements or new forensic evidence."
+        )
         return "\n".join(lines)
 
     def history_text(self) -> str:
         """Faithful assistant-history representation of the result."""
-        text = (f"Deepfake analysis of {self.image_id}: verdict {self.verdict} "
-                f"({self.confidence * 100:.1f}% confidence). "
-                f"Hotspots: {self.hotspots or 'n/a'}. "
-                f"Spectrum: {self.spectral or 'n/a'}.")
+        faces_note = f" ({self.faces_analyzed} faces analyzed)" if self.faces_analyzed > 1 else ""
+        text = (
+            f"Deepfake analysis of {self.image_id}{faces_note}: verdict {self.verdict} "
+            f"({self.confidence * 100:.1f}% confidence). "
+            f"Hotspots: {self.hotspots or 'n/a'}. "
+            f"Spectrum: {self.spectral or 'n/a'}."
+        )
         if self.explanation.strip():
             text += f" {self.explanation.strip()[:600]}"
         return text
@@ -150,26 +181,38 @@ class Conversation:
 
     def usable_asset(self) -> Optional[Asset]:
         asset = self.active_asset()
-        return asset if asset and asset.usable else None
+        return asset if (asset and asset.usable) else None
 
-    def recent_image_id(self, max_turns: int = RECENT_IMAGE_TURNS
-                        ) -> Optional[str]:
-        """The active image, if it arrived within the recent-message window."""
-        asset = self.active_asset()
-        if not asset or not asset.usable:
-            return None
-        if len(self.turns) - asset.added_turn > max_turns:
-            return None
-        return asset.id
+    def recent_asset(self, max_turns: int = RECENT_IMAGE_TURNS) -> Optional[Asset]:
+        """Returns the most recent usable image if added within the recent turn window."""
+        # Check active asset first
+        active = self.active_asset()
+        if active and active.usable:
+            if len(self.turns) - active.added_turn <= max_turns:
+                return active
+
+        # Otherwise check the latest added usable asset
+        for asset in reversed(list(self.assets.values())):
+            if asset.usable and (len(self.turns) - asset.added_turn <= max_turns):
+                return asset
+        return None
+
+    def recent_image_id(self, max_turns: int = RECENT_IMAGE_TURNS) -> Optional[str]:
+        """The id of the active or recent image if within the recent window."""
+        asset = self.recent_asset(max_turns)
+        return asset.id if asset else None
 
     # -- turns ----------------------------------------------------------
     def add_turn(self, role: str, content: str, kind: str = "chat") -> None:
         text = (content or "").strip()
         if not text:
             return
-        self.turns.append({"role": role if role in ("user", "assistant") else "user",
-                           "content": text, "ts": round(time.time(), 3),
-                           "kind": kind})
+        self.turns.append({
+            "role": role if role in ("user", "assistant") else "user",
+            "content": text,
+            "ts": round(time.time(), 3),
+            "kind": kind,
+        })
         self.updated_at = time.time()
 
     def seed_history(self, history: List[Any]) -> None:
@@ -180,8 +223,10 @@ class Conversation:
 
     def history(self, limit: int) -> List[Dict[str, str]]:
         """Generation view: the real transcript, analysis turns included."""
-        return [{"role": t["role"], "content": t["content"]}
-                for t in self.turns[-limit:]]
+        return [
+            {"role": t["role"], "content": t["content"]}
+            for t in self.turns[-limit:]
+        ]
 
     # -- analyses -------------------------------------------------------
     def record_analysis(self, analysis: Analysis) -> Analysis:
@@ -226,21 +271,17 @@ class ConversationStore:
     # -- images ---------------------------------------------------------
     def add_image(self, conversation_id: str, asset_id: Optional[str],
                   raw: bytes, media_type: str = "") -> Asset:
-        """Validate and store an upload; never raise on a bad image.
-
-        A file that cannot be decoded (or is too large / the wrong kind) is
-        kept as `availability=missing` or `support=unsupported`, so routing
-        sees the real reason and the deepfake pipeline is never selected for
-        it. The Router repository's `supported_asset_exists` contract is what
-        the gate was trained with.
-        """
+        """Validate and store an upload; never raise on a bad image."""
         from PIL import Image
 
         with self._lock:
             conv = self.get_or_create(conversation_id)
-            asset = Asset(id=asset_id or conv.next_asset_id(), data=raw,
-                          media_type=media_type or "",
-                          added_turn=len(conv.turns))
+            asset = Asset(
+                id=asset_id or conv.next_asset_id(),
+                data=raw,
+                media_type=media_type or "",
+                added_turn=len(conv.turns),
+            )
             if len(raw) > MAX_IMAGE_BYTES:
                 asset.availability, asset.support = "available", "unsupported"
                 asset.detail = f"image exceeds {MAX_IMAGE_BYTES // (1024 * 1024)} MB"
@@ -271,11 +312,10 @@ class ConversationStore:
             if image_id in conv.assets:
                 conv.active_image_id = image_id
             else:
-                # Referenced but never uploaded: record the gap instead of
-                # silently pointing at another image.
                 conv.assets[image_id] = Asset(
                     id=image_id, availability="missing", support="unsupported",
-                    detail="image id referenced but not uploaded")
+                    detail="image id referenced but not uploaded"
+                )
                 conv.active_image_id = image_id
             conv.updated_at = time.time()
 
@@ -285,75 +325,62 @@ class ConversationStore:
         with self._lock:
             return self.get_or_create(conversation_id).recent_image_id(max_turns)
 
+    def recent_asset(self, conversation_id: str,
+                     max_turns: int = RECENT_IMAGE_TURNS) -> Optional[Asset]:
+        with self._lock:
+            return self.get_or_create(conversation_id).recent_asset(max_turns)
+
     def routing_payload(self, conversation_id: str, message: str, *,
+                        attached_asset: Optional[Any] = None,
                         attached_now: bool = False) -> Dict[str, Any]:
-        """The five-field state plus the two router-only hints.
-
-        `attached_now` is whether this request carried an image; the hints are
-        read by `TrainedLayaRouter` and never serialized into the gate input.
-
-        The state carries at most the one image this turn is about. The
-        checkpoint was trained on a single attachment, and a second (older)
-        asset in `assets` flips an unambiguous request to BASE (measured:
-        "do i look real" 0.989 -> 0.003). An image outside the recent-message
-        window is not passed at all, so an old upload cannot steer the gate.
-        """
-        state = self.routing_state(conversation_id, message)
-        recent = self.recent_image_id(conversation_id)
-        keep = state["active_image_id"] if (attached_now or recent) else None
-        if keep:
-            state["assets"] = [a for a in state["assets"] if a.get("id") == keep]
-            state["active_image_id"] = keep
-        else:
-            state["assets"] = []
-            state["active_image_id"] = None
-        state["attached_now"] = bool(attached_now)
-        state["recent_image_id"] = recent if keep else None
-        return state
-
-    def routing_state(self, conversation_id: str, message: str) -> Dict[str, Any]:
-        """The exact five-field input, populated from server-side state.
-
-        The deepfake exchange is *not* replayed raw into `history`. The
-        checkpoint (trained with one short summary turn per prior exchange)
-        reads a raw prior authenticity request as an operation still pending,
-        so a neutral follow-up ("hello") re-fires DEEPFAKE. Once an analysis
-        exists it is already carried by `last_analysis`, so routing history
-        replaces that exchange with a neutral completion line. Generation
-        history keeps the full transcript; only the routing view is compacted.
+        """Construct the payload for TrainedLayaRouter.
+        
+        Includes the current message, attachment status, and any recent image asset.
         """
         with self._lock:
             conv = self.get_or_create(conversation_id)
-            assets = ([conv.assets[i].routing_view()
-                       for i in conv.assets] if conv.assets else [])
-            active = conv.active_image_id
-            analysis = conv.analysis_for_image(active)
-            last = analysis or conv.last_analysis()
-            history = [
-                {"role": t["role"],
-                 "content": t["content"][:ROUTING_TURN_CHARS]}
-                for t in conv.turns
-                if t.get("kind") != "analysis"
-            ][-ROUTING_HISTORY_TURNS:]
-            if analysis is not None:
-                history = (history + [{
-                    "role": "assistant",
-                    "content": ("I completed the authenticity check for "
-                                f"{analysis.image_id}; the result is saved."),
-                }])[-ROUTING_HISTORY_TURNS:]
-            return {"message": message or "", "history": history,
-                    "assets": assets, "active_image_id": active,
-                    "last_analysis": last.routing_view() if last else None}
+            recent = conv.recent_asset(RECENT_IMAGE_TURNS)
+            target_asset = attached_asset if (attached_now and attached_asset) else recent
+            active_id = target_asset.id if target_asset else conv.active_image_id
+            analysis = conv.analysis_for_image(active_id) if active_id else conv.last_analysis()
+
+            attached_view = (
+                attached_asset.routing_view() if hasattr(attached_asset, "routing_view")
+                else (attached_asset if isinstance(attached_asset, dict) else None)
+            )
+            recent_view = (
+                recent.routing_view() if hasattr(recent, "routing_view")
+                else (recent if isinstance(recent, dict) else None)
+            )
+            assets = [attached_view] if (attached_now and attached_view) else ([recent_view] if recent_view else [])
+
+            return {
+                "message": message or "",
+                "attached_now": bool(attached_now),
+                "attached_asset": attached_view,
+                "recent_asset": recent_view,
+                "assets": assets,
+                "active_image_id": active_id,
+                "last_analysis": analysis.routing_view() if analysis else None,
+                "history": conv.history(ROUTING_HISTORY_TURNS),
+            }
 
     def generation_context(self, conversation_id: str,
-                           image_id: Optional[str] = None) -> Dict[str, Any]:
-        """History + saved analysis for the generator (never for the router)."""
+                           image_id: Optional[str] = None,
+                           message: str = "") -> Dict[str, Any]:
+        """History + saved analysis for the generator (separate from router context)."""
         with self._lock:
             conv = self.get_or_create(conversation_id)
-            analysis = conv.analysis_for_image(image_id) if image_id else conv.last_analysis()
-            return {"history": conv.history(GENERATION_HISTORY_TURNS),
-                    "analysis": analysis,
-                    "analysis_block": analysis.generation_block() if analysis else ""}
+            target_id = image_id or conv.active_image_id
+            analysis = conv.analysis_for_image(target_id) if target_id else conv.last_analysis()
+            has_analysis = analysis is not None
+            is_followup = has_analysis and is_verdict_question(message)
+            return {
+                "history": conv.history(GENERATION_HISTORY_TURNS),
+                "analysis": analysis,
+                "analysis_block": analysis.generation_block() if has_analysis else "",
+                "is_verdict_followup": is_followup,
+            }
 
     def record_analysis(self, conversation_id: str, analysis: Analysis) -> Analysis:
         with self._lock:

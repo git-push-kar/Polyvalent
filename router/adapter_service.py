@@ -221,6 +221,7 @@ class AdapterService:
         self.deepfake_vision_dir = deepfake_vision_dir
         self.custom_heads_path = custom_heads_path
         self._tokenizer = None
+        self._face_detector = None
         self._stub_backend = _stub_env()
         self.residency = AdapterResidency(
             self._make_stub_backend() if self._stub_backend
@@ -372,6 +373,17 @@ class AdapterService:
         return {**self.residency.status(),
                 "mode": "stub" if self._stub_backend else "real"}
 
+    def _ensure_face_detector(self):
+        if getattr(self, "_face_detector", None) is None:
+            try:
+                from deepfake.face_detect import FaceDetector
+                weights = os.getenv("FINAL_FACE_YOLO", "./models/yolov8n-face.pt")
+                self._face_detector = FaceDetector(weights=weights, device="cpu")
+            except Exception as exc:
+                logger.warning("Could not load FaceDetector (%s); fallback to whole image", exc)
+                self._face_detector = None
+        return self._face_detector
+
     # -- deepfake forensic analysis (wrapper path) -------------------------
     def analyze_image_stream(self, image_bytes: bytes, max_new_tokens: int = 512,
                              temperature: float = 0.0,
@@ -396,13 +408,16 @@ class AdapterService:
         if use_stub:
             yield {"event": "verdict", "verdict": "REAL", "confidence": 0.5,
                    "hotspots": "stub", "spectral": "stub",
-                   "telemetry_ms": 0.0, "mode": "stub"}
+                   "telemetry_ms": 0.0, "mode": "stub",
+                   "routing_path": "stub", "faces_detected": 1, "faces_analyzed": 1,
+                   "faces_skipped": 0, "primary_face_id": 1}
             yield from self._stub_stream("stub forensic reasoning", max_new_tokens)
             return
         import torch
         from PIL import Image as _Image
         from transformers import TextIteratorStreamer
 
+        from deepfake.face_detect import route_image
         from deepfake.forensics import (build_telemetry_prompt,
                                         extract_forensic_telemetry,
                                         preprocess_image)
@@ -419,32 +434,79 @@ class AdapterService:
                    "text": "That file doesn't look like an image I can read. "
                            "Please attach a JPG or PNG face photo and ask again."}
             return
-        pv, freq = preprocess_image(img, device=str(device))
+
+        detector = self._ensure_face_detector()
+        route = route_image(img, detector)
+        items = route["items"]
+        routing_path = route["path"]
+        boxes = route["boxes"]
+        skipped = route["skipped"]
 
         t_tele = time.perf_counter()
-        with torch.no_grad():
-            _vis = wrapper._get_vision_features(pv, return_attn_weights=True)
-            cls_token, pooled, _patches, attn_w = _vis
-            freq_emb = wrapper.freq_branch(freq.to(device))
-            _dt = wrapper.cls_head.net[0].weight.dtype
-            vis_cat = torch.cat([cls_token.to(_dt), pooled.to(_dt),
-                                 freq_emb.to(_dt)], dim=-1)
-            logits = wrapper.cls_head(vis_cat)
-            probs = torch.softmax(logits.float(), dim=-1)
-            pred = int(logits.argmax(-1).item())
-            conf = float(probs[0, pred].item())
-        telemetry = extract_forensic_telemetry(pred, conf, freq, attn_w)
-        telemetry_ms = (time.perf_counter() - t_tele) * 1000.0
-        yield {"event": "verdict", "verdict": telemetry["verdict"],
-               "confidence": round(conf, 4),
-               "hotspots": telemetry["regions"],
-               "spectral": telemetry["spectral_desc"],
-               "telemetry_ms": round(telemetry_ms, 1)}
-        prompt_text = build_telemetry_prompt(telemetry)
+        classified_items = []
+        _dt = wrapper.cls_head.net[0].weight.dtype
 
-        # Reasoning generation with token streaming (mirrors predict()).
         with torch.no_grad():
-            vis_tokens = wrapper._get_native_visual_tokens(pv)
+            for it in items:
+                it_pv, it_freq = preprocess_image(it["image"], device=str(device))
+                cls_token, pooled, _patches, attn_w = wrapper._get_vision_features(it_pv, return_attn_weights=True)
+                freq_emb = wrapper.freq_branch(it_freq.to(device))
+                vis_cat = torch.cat([cls_token.to(_dt), pooled.to(_dt), freq_emb.to(_dt)], dim=-1)
+                logits = wrapper.cls_head(vis_cat)
+                probs = torch.softmax(logits.float(), dim=-1)
+                p_fake = float(probs[0, 1].item())
+                conf = float(probs[0].max().item())
+                pred = 1 if p_fake >= 0.50 else 0
+                telemetry = extract_forensic_telemetry(pred, conf, it_freq, attn_w)
+                classified_items.append({
+                    **it,
+                    "pv": it_pv,
+                    "freq": it_freq,
+                    "p_fake": p_fake,
+                    "confidence": conf,
+                    "pred": pred,
+                    "verdict": "FAKE" if pred == 1 else "REAL",
+                    "telemetry": telemetry,
+                })
+        telemetry_ms = (time.perf_counter() - t_tele) * 1000.0
+
+        # Aggregation: max p_fake (threat model: a single forged face compromises media)
+        winner = max(classified_items, key=lambda x: (x["p_fake"], -x["id"]))
+        doc_verdict = winner["verdict"]
+        doc_conf = winner["confidence"]
+
+        verdict_event = {
+            "event": "verdict",
+            "verdict": doc_verdict,
+            "confidence": round(doc_conf, 4),
+            "hotspots": winner["telemetry"]["regions"],
+            "spectral": winner["telemetry"]["spectral_desc"],
+            "telemetry_ms": round(telemetry_ms, 1),
+            "routing_path": routing_path,
+            "faces_detected": len(boxes),
+            "faces_analyzed": len(classified_items),
+            "faces_skipped": len(skipped),
+            "primary_face_id": winner["id"],
+        }
+        if routing_path == "per_face":
+            verdict_event["faces"] = [
+                {
+                    "face_id": it["id"],
+                    "box": it["box"].as_list() if it.get("box") else None,
+                    "verdict": it["verdict"],
+                    "confidence": round(it["confidence"], 4),
+                    "p_fake": round(it["p_fake"], 4),
+                    "hotspots": it["telemetry"]["regions"],
+                }
+                for it in classified_items
+            ]
+        yield verdict_event
+
+        prompt_text = build_telemetry_prompt(winner["telemetry"])
+
+        # Reasoning generation with token streaming for the decisive face crop (or full image in passthrough).
+        with torch.no_grad():
+            vis_tokens = wrapper._get_native_visual_tokens(winner["pv"])
         inputs_embeds = vis_tokens.to(torch.bfloat16)
         prompt_ids = tokenizer(prompt_text, return_tensors="pt",
                                add_special_tokens=False).input_ids.to(device)
