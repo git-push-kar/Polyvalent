@@ -233,3 +233,78 @@ def test_e2e_full_lifecycle_cases():
     route_6 = next(e for e in evs_6 if e["event"] == "route")
     assert route_6["task"] == "general"
     assert "gate:finetuned-base" in route_6["reason"]
+
+
+def test_screenshot_2_flow():
+    """Screenshot 2:
+    1. 'do i look real' with image -> DEEPFAKE
+    2. 'mind explaining why' -> BASE with analysis_supplied=True, attach_pixels=False
+    3. 'does this image look fake' -> DEEPFAKE
+    """
+    conv_id = "test_screenshot_2"
+    img_b64 = _sample_png_b64()
+
+    # Turn 1: 'do i look real' with image -> DEEPFAKE
+    evs_1 = chat_stream(
+        "do i look real",
+        conversation_id=conv_id,
+        image_base64=img_b64,
+        image_ids=["img_1"],
+        active_image_id="img_1"
+    )
+    route_1 = next(e for e in evs_1 if e["event"] == "route")
+    assert route_1["task"] == "deepfake"
+    assert next((e for e in evs_1 if e["event"] == "verdict"), None) is not None
+
+    # Turn 2: 'mind explaining why' -> BASE, analysis supplied, no pixels passed
+    evs_2 = chat_stream(
+        "mind explaining why",
+        conversation_id=conv_id,
+        deep_thinking=False
+    )
+    route_2 = next(e for e in evs_2 if e["event"] == "route")
+    assert route_2["task"] == "general"
+    ctx_2 = next(e for e in evs_2 if e["event"] == "context")
+    assert ctx_2["analysis_supplied"] is True
+    assert ctx_2["image_id"] is None  # no pixel re-feed
+
+    # Turn 3: 'does this image look fake' -> DEEPFAKE
+    evs_3 = chat_stream(
+        "does this image look fake",
+        conversation_id=conv_id
+    )
+    route_3 = next(e for e in evs_3 if e["event"] == "route")
+    assert route_3["task"] == "deepfake"
+
+
+def test_screenshot_3_flow_anaphora_resolution():
+    """Screenshot 3:
+    1. 'what do u think about this' with image -> BASE with pixels
+    2. 'does it look fake' (no image attached) -> DEEPFAKE via two-verdict + anaphora resolution
+    """
+    conv_id = "test_screenshot_3"
+    img_b64 = _sample_png_b64()
+
+    # Turn 1: 'what do u think about this' with image -> BASE
+    evs_1 = chat_stream(
+        "what do u think about this",
+        conversation_id=conv_id,
+        image_base64=img_b64,
+        image_ids=["img_1"],
+        active_image_id="img_1"
+    )
+    route_1 = next(e for e in evs_1 if e["event"] == "route")
+    assert route_1["task"] == "general"
+    ctx_1 = next(e for e in evs_1 if e["event"] == "context")
+    assert ctx_1["image_id"] == "img_1"  # BASE receives pixels!
+
+    # Turn 2: 'does it look fake' (no image attached now, references prior image)
+    evs_2 = chat_stream(
+        "does it look fake",
+        conversation_id=conv_id
+    )
+    route_2 = next(e for e in evs_2 if e["event"] == "route")
+    assert route_2["task"] == "deepfake", f"Expected DEEPFAKE for 'does it look fake', got {route_2['task']}"
+    assert route_2["reason"] == "gate:two-verdict-deepfake-recent-image"
+    assert next((e for e in evs_2 if e["event"] == "verdict"), None) is not None
+

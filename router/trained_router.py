@@ -20,11 +20,45 @@ the recent image to detect when the user is referencing that image for verificat
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Dict, Optional
 
 from .base import BaseRouter, RouterDecision
 from .laya_gate import LayaGate, build_state, serialize, supported_asset_exists
+
+_AUTH_INTENT_WORDS = (
+    "fake", "real", "ai", "generated", "deepfake",
+    "tampered", "manipulated", "authentic", "authenticity",
+)
+
+_ANAPHORA_NOUNS_RE = re.compile(
+    r'\b(this photo|the photo|photo|the picture|this picture|picture|the face|this face|face|this person|the person|the guy|the woman|the man|it|this)\b',
+    re.I
+)
+
+_DO_I_LOOK_RE = re.compile(r'\b(do|does)\s+i\s+look\b', re.I)
+
+
+def resolve_anaphora_for_laya(message: str) -> str:
+    """Resolve anaphoric pronouns to 'this image' when authenticity intent is present.
+
+    ModernBERT in the fine-tuned LAYA checkpoint was trained on explicit asset
+    references ('this image', 'the image') rather than pronouns like 'it', 'this',
+    'the photo', 'the face', or 'do i look'. When an active or recent image is
+    present, normalizing these references aligns the turn with the trained vocabulary
+    without modifying the user's message in the conversation history or generation.
+    """
+    if not message:
+        return ""
+    low = message.lower()
+    if not any(w in low for w in _AUTH_INTENT_WORDS):
+        return message
+
+    msg = _DO_I_LOOK_RE.sub("does this image look", message)
+    if "image" not in msg.lower():
+        msg = _ANAPHORA_NOUNS_RE.sub("this image", msg, count=1)
+    return msg
 
 
 class _clock:
@@ -139,8 +173,9 @@ class TrainedLayaRouter(BaseRouter):
             asset_id = _get_id(attached_asset) or active_image_id
 
             with _clock(steps, "gate_forward"):
+                laya_msg = resolve_anaphora_for_laya(message)
                 state = build_state(
-                    message=message,
+                    message=laya_msg,
                     assets=[asset_view] if asset_view else [],
                     active_image_id=asset_id,
                     last_analysis=last_analysis,
@@ -164,6 +199,8 @@ class TrainedLayaRouter(BaseRouter):
                 "active_image_id": asset_id,
                 "last_analysis": last_analysis,
                 "attached_now": True,
+                "original_message": message,
+                "laya_message": laya_msg,
             }
 
             if gate_res["route"] == "DEEPFAKE":
@@ -258,8 +295,9 @@ class TrainedLayaRouter(BaseRouter):
             v_no = self._gate.classify_state(state_no)
 
         with _clock(steps, "gate_forward_with_img"):
+            laya_msg_with = resolve_anaphora_for_laya(message)
             state_with = build_state(
-                message=message,
+                message=laya_msg_with,
                 assets=[recent_view] if recent_view else [],
                 active_image_id=recent_id,
                 last_analysis=last_analysis,
@@ -291,6 +329,8 @@ class TrainedLayaRouter(BaseRouter):
             "last_analysis": last_analysis,
             "attached_now": False,
             "recent_image_id": recent_id,
+            "original_message": message,
+            "laya_message": laya_msg_with,
         }
 
         # If v_with clearly selects DEEPFAKE: the request asks for authenticity verification

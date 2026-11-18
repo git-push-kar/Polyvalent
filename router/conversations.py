@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -39,14 +40,24 @@ _VERDICT_FOLLOWUP_WORDS = (
     "why fake", "why real", "why is it fake", "why is it real",
     "why did you say", "explain that", "explain why", "explain the",
     "evidence", "hotspot", "spectral", "findings", "how do you know",
-    "reason for", "what makes you say", "how did you classify",
+    "reason for", "what makes you say", "how did you classify", "classify",
+    "classification",
+)
+
+_EXPLANATION_FOLLOWUP_RE = re.compile(
+    r'\b(explain|explaining|explanation|elaborate|elaborating|clarify|clarification|details|detail|breakdown|why|how so|how come|reason)\b',
+    re.I
 )
 
 
 def is_verdict_question(message: str) -> bool:
     """True if message asks to explain or discuss a recorded forensic verdict."""
-    low = (message or "").lower()
-    return any(w in low for w in _VERDICT_FOLLOWUP_WORDS)
+    low = (message or "").lower().strip()
+    if any(w in low for w in _VERDICT_FOLLOWUP_WORDS):
+        return True
+    if _EXPLANATION_FOLLOWUP_RE.search(low):
+        return True
+    return False
 
 
 @dataclass
@@ -109,8 +120,6 @@ class Analysis:
             summary.append(f"Hotspots: {self.hotspots[:160]}")
         if self.spectral:
             summary.append(f"Spectral: {self.spectral[:160]}")
-        if self.explanation.strip():
-            summary.append(f"Explanation: {self.explanation.strip()[:240]}")
         return {
             "asset_id": self.image_id,
             "verdict": self.verdict,
