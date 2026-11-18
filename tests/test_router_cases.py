@@ -308,3 +308,29 @@ def test_screenshot_3_flow_anaphora_resolution():
     assert route_2["reason"] == "gate:two-verdict-deepfake-recent-image"
     assert next((e for e in evs_2 if e["event"] == "verdict"), None) is not None
 
+
+
+def test_return_to_portrait_after_topic_change():
+    conv_id = "return_to_portrait"
+    def turn(message, **kwargs):
+        events = chat_stream(message, conversation_id=conv_id, **kwargs)
+        assert events[-1]["event"] == "done"
+        return {event["event"]: event for event in events}
+
+    first = turn("Describe this portrait", image_base64=_sample_png_b64())
+    image_id = first["context"]["image_id"]
+    assert image_id and first["adapter"]["task"] == "general"
+    for question in ("What is the capital of France?", "What is 3 + 5?",
+                     "Name two oceans.", "What is a prime number?"):
+        assert turn(question)["adapter"]["task"] == "general"
+
+    visual = turn("What color was the shirt in the earlier portrait?")
+    assert visual["adapter"]["task"] == "general"
+    assert visual["context"]["image_id"] == image_id
+    check = turn("Going back to the portrait, was it AI-generated?")
+    assert check["adapter"]["task"] == "deepfake"
+    assert check["analysis_saved"]["image_id"] == image_id
+
+    missing = turn("Is this image fake?", active_image_id="missing")
+    assert "verdict" not in missing
+    assert missing.get("adapter", {}).get("task") != "deepfake"

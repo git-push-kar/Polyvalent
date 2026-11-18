@@ -27,13 +27,13 @@ from typing import Any, Dict, Optional
 from .base import BaseRouter, RouterDecision
 from .laya_gate import LayaGate, build_state, serialize, supported_asset_exists
 
-_AUTH_INTENT_WORDS = (
-    "fake", "real", "ai", "generated", "deepfake",
-    "tampered", "manipulated", "authentic", "authenticity",
+_AUTH_INTENT_RE = re.compile(
+    r"\b(?:fake|real|ai|generated|deepfake|tampered|manipulated|authentic|authenticity)\b",
+    re.I,
 )
 
 _ANAPHORA_NOUNS_RE = re.compile(
-    r'\b(this photo|the photo|photo|the picture|this picture|picture|the face|this face|face|this person|the person|the guy|the woman|the man|it|this)\b',
+    r'\b(this photo|the photo|photo|the picture|this picture|picture|the face|this face|face|this person|the person|the guy|the woman|the man|it|this(?!\s+\w))\b',
     re.I
 )
 
@@ -52,7 +52,7 @@ def resolve_anaphora_for_laya(message: str) -> str:
     if not message:
         return ""
     low = message.lower()
-    if not any(w in low for w in _AUTH_INTENT_WORDS):
+    if not _AUTH_INTENT_RE.search(low):
         return message
 
     msg = _DO_I_LOOK_RE.sub("does this image look", message)

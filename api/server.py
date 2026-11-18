@@ -533,6 +533,10 @@ def _chat_stream(req: ChatRequest):
                   if attached_asset else None)
 
     # -- routing: LAYA's five-field state, or the explicit thinking pin --
+    state = store.routing_payload(
+        conversation_id, req.message, attached_asset=attached_asset,
+        attached_now=attached_now)
+    target_asset = attached_asset or conv.assets.get(state["active_image_id"])
     if req.deep_thinking:
         decision = RouterDecision(
             router="manual", task="reasoning", confidence=1.0,
@@ -540,10 +544,6 @@ def _chat_stream(req: ChatRequest):
             latency_ms=0.0, steps={}, abstained=False,
             extra={"gate": None, "router_input": None})
     else:
-        state = store.routing_payload(
-            conversation_id, req.message,
-            attached_asset=attached_asset,
-            attached_now=attached_now)
         decision = _route_trained(state)
 
     log_record: Dict[str, Any] = {
@@ -565,10 +565,6 @@ def _chat_stream(req: ChatRequest):
     task = decision.task
 
     # DEEPFAKE is executable only for an available, supported image.
-    target_asset = (
-        attached_asset if (attached_now and attached_asset and attached_asset.usable)
-        else conv.recent_asset()
-    )
 
     if task == "deepfake" and not (target_asset and target_asset.usable):
         detail = target_asset.detail if target_asset else "no image attached"
@@ -585,15 +581,12 @@ def _chat_stream(req: ChatRequest):
         yield _sse({"event": "done"})
         return
 
-    if task == "deepfake" and target_asset:
-        conv.active_image_id = target_asset.id
-
     yield _sse({"event": "route", "task": task,
                 "label": TASK_LABELS.get(task, task),
                 "reason": decision.reason})
 
     # -- generation context (separate from the routing view) ------------
-    ctx = store.generation_context(conversation_id, image_id=conv.active_image_id, message=req.message)
+    ctx = store.generation_context(conversation_id, image_id=target_asset.id if target_asset else None, message=req.message)
     history_turns = ctx["history"]
     analysis = ctx["analysis"]
     analysis_block = ctx["analysis_block"]
@@ -607,9 +600,9 @@ def _chat_stream(req: ChatRequest):
         if attached_now and attached_asset and attached_asset.usable:
             attach_pixels = True
             pixel_bytes = attached_asset.data
-        elif conv.recent_asset() and not is_verdict_followup:
+        elif target_asset and target_asset.usable and not is_verdict_followup:
             attach_pixels = True
-            pixel_bytes = conv.recent_asset().data
+            pixel_bytes = target_asset.data
         else:
             attach_pixels = False
             pixel_bytes = None
@@ -619,7 +612,7 @@ def _chat_stream(req: ChatRequest):
 
     yield _sse({"event": "context", "history_turns": len(history_turns),
                 "analysis_id": analysis.id if analysis else None,
-                "image_id": (conv.active_image_id
+                "image_id": (target_asset.id
                              if (attach_pixels or task == "deepfake") else None),
                 "analysis_supplied": bool(analysis_block)})
 

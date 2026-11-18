@@ -80,21 +80,15 @@ follow-up such as "Explain that verdict" is routed again (normally `BASE`) and
 receives the recorded analysis — not a second forensic pass; an explicit rerun
 is what sends it back to `DEEPFAKE`.
 
-The routing state carries at most one asset: the image attached to this turn,
-or the active image when it arrived within the recent-message window (the
-upload turn plus six transcript entries, about three exchanges).
+Chat routes one image per turn. A current upload or image ID takes priority.
+Within six transcript entries of an upload, an implicit follow-up can use the
+active image. Later in the same conversation, an explicit reference such as
+“the earlier portrait” or “the photo I uploaded” can still select that image.
 
-When an image was uploaded earlier in the thread without a deepfake check, and a
-subsequent turn asks for verification without re-attaching the image, the router
-consults LAYA under a two-verdict evaluation:
-1. Evaluates the request without an image (as standalone text).
-2. Evaluates the request with the recent image attached.
-
-If LAYA selects DEEPFAKE with the recent image present (while returning BASE
-without it), the router recognizes the reference to the recent image, routes to
-DEEPFAKE, and executes the deepfake forensic pipeline on that image. Conversely,
-ordinary visual questions, greetings, or questions explaining a recorded verdict
-keep BASE.
+For a follow-up with a stored image, the router evaluates the message with and
+without the image metadata. The image-conditioned DEEPFAKE choice at probability
+0.50 or above dispatches the selected image to the forensic adapter. Ordinary
+visual questions can use the same stored pixels on BASE.
 
 Because LAYA was fine-tuned on single messages and asset availability, routing
 context sends `history: []` to LAYA to prevent cross-turn transcript pollution.

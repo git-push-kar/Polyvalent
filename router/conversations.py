@@ -50,6 +50,17 @@ _EXPLANATION_FOLLOWUP_RE = re.compile(
 )
 
 
+# An explicit reference can reach the active upload beyond the recent-turn window.
+_IMAGE_REFERENCE = re.compile(
+    r"\b(?:the|that|this|my|our|your|earlier|previous|original|uploaded|attached|same|last)"
+    r"\s+(?:(?:earlier|previous|original|uploaded|attached|same|last|first)\s+)*"
+    r"(?:image|photo(?:graph)?|picture|portrait|selfie|screenshot|face)\b"
+    r"|\b(?:image|photo(?:graph)?|picture|portrait|selfie|screenshot)\s+"
+    r"(?:(?:that|which)\s+)?(?:i|we|you)\s+(?:sent|uploaded|shared|attached)\b",
+    re.I,
+)
+
+
 def is_verdict_question(message: str) -> bool:
     """True if message asks to explain or discuss a recorded forensic verdict."""
     low = (message or "").lower().strip()
@@ -348,9 +359,14 @@ class ConversationStore:
         """
         with self._lock:
             conv = self.get_or_create(conversation_id)
-            recent = conv.recent_asset(RECENT_IMAGE_TURNS)
+            recent = None
+            if attached_asset is None:
+                recent = conv.usable_asset()
+                if recent and not _IMAGE_REFERENCE.search(message or ""):
+                    if len(conv.turns) - recent.added_turn > RECENT_IMAGE_TURNS:
+                        recent = None
             target_asset = attached_asset if (attached_now and attached_asset) else recent
-            active_id = target_asset.id if target_asset else conv.active_image_id
+            active_id = target_asset.id if target_asset else None
             analysis = conv.analysis_for_image(active_id) if active_id else conv.last_analysis()
 
             attached_view = (
