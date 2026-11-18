@@ -11,7 +11,7 @@ Base model (shared by every specialist):
 
 | Routed task | Path | Format | Copied from |
 |---|---|---|---|
-| `anomaly` | `adapters/anomaly` | PEFT LoRA r=16 / a=32 on q,k,v,o,gate,up,down | `C:\Users\Admin\Desktop\C68-Anomaly` (trained RCA adapter; the checkout no longer ships the safetensors, this copy is the artifact) |
+| `anomaly` | `adapters/anomaly` | PEFT LoRA r=16 / a=32 on q,k,v,o,gate,up,down | `C:\Users\Admin\Desktop\anomaly\outputs\tep_rca_internvl3_2b` (adapter_name `internvl3_2b_pristine_rca`; byte-identical, SHA-256 `050ee467...`) |
 | `reasoning` | `adapters/reasoning` | PEFT LoRA r=64 / a=128 on q,k,v,o,gate,up,down | `C:\Users\Admin\Desktop\C68-LR\models_v3\adapter\adapter` |
 | `deepfake` | `adapters/deepfake` | `llm_adapter/` (r=64), `vision_adapter/` (r=16), `custom_heads/custom_heads.safetensors` | `C:\Users\Admin\Desktop\LY_C68\deepfake_project\runs\intern_v2_ground\adapters` |
 | `general` | - | pristine base, no adapter | - |

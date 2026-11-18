@@ -1,25 +1,32 @@
-"""Bridge to the trained Layer-A detector of the C68-Anomaly pipeline.
+"""Bridge to the trained TEP stack of the `anomaly/` training repository.
 
-`C68-Anomaly` ships the whole simulation pipeline (normal-only scaler, LSTM-AE,
-event aggregation, evidence bridge), so the anomaly tab can replay a run through
-the trained detector instead of the builtin z-score stand-in. Two defects in
-that repository's artifacts are repaired here, at load time, without editing it:
+The deployment artifacts are split in two halves (see
+`anomaly/docs/reports/HYBRID_LIVE_INTEGRATION_PLAN_2026-11-16.md` §9):
 
-  * Architecture metadata. `outputs/anomaly_detector/config.json` claims
-    hidden 128 / latent 64 while `model.pt` holds hidden 32 / latent 16
-    (`encoder.lstm.weight_ih_l0` = [128, 52] = 4*32). `from_artifacts` trusts the
-    file, so it builds a model that can never accept the checkpoint. Shapes are
-    inferred from the tensors instead.
-  * Operating point. `threshold.json` (0.687) belongs to an older, larger
-    model: the shipped 32/16 net scores the bundled fault-free runs at a mean of
-    0.97 and a maximum of 1.53, i.e. it would alarm on every window. The
-    threshold is re-derived with the repository's own method — a percentile of
-    the score on fault-free data — over the test runs in `data/tep_test`.
+  L1 diagnosis — `outputs/analysis/phase3a/hybrid/vocabfix/protocolA/`
+                 LightGBM booster over 323 page features, isotonic calibration,
+                 menu rule over 15 faults + `UNCLASSIFIED_OPEN_SET`. CPU only.
+  L2 writer    — `outputs/tep_rca_internvl3_2b` (InternVL3-2B + LoRA), used by
+                 `adapters/anomaly` in this repo — byte-identical to the
+                 deployment weights (SHA-256 050ee467…).
 
-Both values are reported in the timeline so a reader can tell a trained run
-from the builtin detector and see which operating point was used. Point
-`FINAL_ANOMALY_REPO` at a different checkout, `FINAL_ANOMALY_THRESHOLD` at a
-threshold you want to pin, and `FINAL_TEP_TEST_DIR` at other fault-free runs.
+`TEPApp` already owns the seam: with `config["hybrid"]["enabled"]` it renders the
+classifier page from each closed event's evidence, scores it and stores the
+verdict as `report["diagnosis"]`, never touching the prose. This module turns
+that on, replays a run, closes the trailing event so its verdict is not lost,
+and reports both halves.
+
+Two ports are supported: the repository holding the L1 artifacts is preferred,
+and `C68-Anomaly` (detector pipeline only, no L1) still works as a fallback.
+That fallback needs two repairs, applied here instead of editing it:
+
+  * its `config.json` claims hidden 128 / latent 64 while `model.pt` is 32/16,
+  * its `threshold.json` (0.687) belongs to a larger model, so the shipped net
+    alarms on every fault-free window.
+
+Shape inference always runs (harmless when the metadata is right); the operating
+point is only re-derived when the stored threshold actually fails the fault-free
+runs, which keeps the training repo's calibrated value intact.
 """
 from __future__ import annotations
 
@@ -33,35 +40,43 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .dataset import Scenario, load
+from .dataset import Scenario, dataset_dir, load
 
 logger = logging.getLogger(__name__)
 
 _REPO = Path(__file__).resolve().parent.parent
+_L1_ARTIFACTS = Path("outputs/analysis/phase3a/hybrid/vocabfix/protocolA/classifier.txt")
 _PERCENTILE = 99.0
-_STATE: Dict[str, Any] = {"threshold": None, "source": None, "repo": None}
+_FALSE_ALARM_GUARD = 0.20   # stored threshold failing this share of normal windows
+_STATE: Dict[str, Any] = {"threshold": None, "source": None, "repo": None,
+                          "hybrid": None}
 _LOCK = threading.Lock()
 
 
 def repo_dir() -> Optional[Path]:
-    """Locate the C68-Anomaly checkout (env override, then sibling folders)."""
+    """Locate the training checkout, preferring the one that carries L1."""
     raw = (os.getenv("FINAL_ANOMALY_REPO") or "").strip().strip('"')
     candidates: List[Path] = []
     if raw:
         candidates.append(Path(raw).expanduser())
-    candidates += [_REPO.parent / "C68-Anomaly", _REPO.parent / "anomaly"]
+    candidates += [_REPO.parent / "anomaly", _REPO.parent / "C68-Anomaly"]
+
+    usable: List[Path] = []
     for cand in candidates:
         if not cand.is_absolute():
             cand = _REPO / cand
         if (cand / "main.py").is_file() and (cand / "anomaly_detection").is_dir():
-            return cand.resolve()
-    return None
+            usable.append(cand.resolve())
+    for cand in usable:                     # a checkout with the L1 booster wins
+        if (cand / _L1_ARTIFACTS).is_file():
+            return cand
+    return usable[0] if usable else None
 
 
-# -- loader repair -----------------------------------------------------------
+# -- loader repair (C68-Anomaly only, harmless elsewhere) --------------------
 
 def _patch_loader() -> None:
-    """Make `AnomalyDetector.from_artifacts` read the checkpoint, not the file."""
+    """Make `AnomalyDetector.from_artifacts` infer the architecture from tensors."""
     from anomaly_detection import inference as inference_mod
     from anomaly_detection.lstm_autoencoder import build_autoencoder
     from anomaly_detection.threshold import load_threshold
@@ -107,8 +122,6 @@ def _patch_loader() -> None:
 
 def _fault_free_runs(limit: int = 3) -> List[np.ndarray]:
     """Fault-free arrays from the test set (the repo's own FAR calibration data)."""
-    from .dataset import dataset_dir
-
     root = dataset_dir()
     if root is None:
         return []
@@ -126,21 +139,32 @@ def _operating_point(app, repo: Path) -> Tuple[float, str]:
     pinned = (os.getenv("FINAL_ANOMALY_THRESHOLD") or "").strip()
     if pinned:
         return float(pinned), "FINAL_ANOMALY_THRESHOLD"
-    scores: List[float] = []
+
+    stored = float(app.detector.threshold.threshold)
     window, stride = int(app.window_size), int(app.stride)
+    scores: List[float] = []
     for run in _fault_free_runs():
         for t in range(0, len(run) - window + 1, stride):
             score, _ = app.detector.score_window(run[t:t + window])
             scores.append(float(score))
     if not scores:
-        stored = float(app.detector.threshold.threshold)
-        return stored, "threshold.json (no fault-free runs to recalibrate on)"
-    derived = float(np.percentile(np.asarray(scores), _PERCENTILE))
-    return derived, (f"p{_PERCENTILE:g} of {len(scores)} fault-free windows "
-                     f"in data/tep_test")
+        return stored, "threshold.json (no fault-free runs to check against)"
+
+    values = np.asarray(scores)
+    false_rate = float((values > stored).mean())
+    if false_rate <= _FALSE_ALARM_GUARD:
+        return stored, (f"threshold.json (alarms {false_rate:.1%} of "
+                        f"{len(values)} fault-free windows)")
+    derived = float(np.percentile(values, _PERCENTILE))
+    logger.warning("stored threshold %.3f alarms %.0f%% of fault-free windows; "
+                   "re-deriving at p%g = %.3f",
+                   stored, false_rate * 100, _PERCENTILE, derived)
+    return derived, (f"re-derived p{_PERCENTILE:g} of {len(values)} fault-free "
+                     f"windows (threshold.json {stored:.3f} alarmed "
+                     f"{false_rate:.0%})")
 
 
-def _build(repo: Path) -> Tuple[Any, float, str]:
+def _build(repo: Path) -> Tuple[Any, float, str, Optional[str]]:
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
     _patch_loader()
@@ -154,30 +178,74 @@ def _build(repo: Path) -> Tuple[Any, float, str]:
     store = _REPO / "logs" / "tep_sim"
     store.mkdir(parents=True, exist_ok=True)
     config.setdefault("events", {})["db_path"] = str(store / "events.db")
+    # This test export injects faults at sample 20 (data/tep_test/dataset.json),
+    # while the training config assumes 160 for the 48 h Braatz runs. The onset
+    # drives the pre-fault context the L1 page renders, so a stale value shifts
+    # every page the classifier reads. Follow the dataset that is replayed.
+    from .dataset import fault_onset
+
+    onset = int(fault_onset())
+    dataset_cfg = config.setdefault("dataset", {})
+    fault_onsets = dataset_cfg.setdefault("fault_onset", {})
+    fault_onsets["faulty_testing"] = onset
+    fault_onsets["faulty_training"] = onset
+    dataset_cfg["fault_onset_index"] = onset
+    # L1 diagnosis (§9.5): the verdict is its own field, the prose is untouched.
+    hybrid_cfg = config.setdefault("hybrid", {})
+    hybrid_cfg["enabled"] = True
+    hybrid_cfg.setdefault("artifact_dir",
+                          str(Path("outputs/analysis/phase3a/hybrid/vocabfix")))
+    # The menu threshold is a pre-registered false-abstention budget, not a knob
+    # (§9.9); the stored 1.0 is used unless a deployment pins another value.
+    menu_threshold = (os.getenv("FINAL_ANOMALY_MENU_THRESHOLD") or "").strip()
+    if menu_threshold:
+        hybrid_cfg["threshold"] = float(menu_threshold)
     with contextlib.chdir(repo):
         app = TEPApp(config, enable_llm=False)
         threshold, source = _operating_point(app, repo)
     app.detector.threshold.threshold = float(threshold)
-    return app, threshold, source
+    hybrid_error = None if getattr(app, "hybrid", None) is not None else "hybrid unavailable"
+    return app, threshold, source, hybrid_error
 
 
 # -- replay ------------------------------------------------------------------
+
+def _diagnosis_of(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    report = event.get("report") or {}
+    verdict = report.get("diagnosis") if isinstance(report, dict) else None
+    return verdict if isinstance(verdict, dict) else None
+
+
+def _as_event(captured: Any, tick: int, row: np.ndarray,
+              event_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    for conv in ("model_dump", "dict", "to_dict"):
+        if not isinstance(captured, dict) and hasattr(captured, conv):
+            captured = getattr(captured, conv)()
+    if not isinstance(captured, dict):
+        return None
+    ident = event_id or captured.get("event_id") or f"ANOM-{tick}"
+    evidence = captured.get("evidence") if isinstance(captured.get("evidence"), dict) else captured
+    return {"event_id": ident, "start_tick": tick, "confirm_tick": tick,
+            "end_tick": captured.get("end_sample") or None,
+            "evidence": {**evidence, "event_id": ident},
+            "diagnosis": _diagnosis_of(captured),
+            "event": captured,
+            "values": [round(float(v), 5) for v in row]}
+
 
 def replay(scenario: Scenario, samples: Optional[np.ndarray] = None
            ) -> Dict[str, Any]:
     """Replay one run through the trained pipeline (fresh state per run)."""
     repo = repo_dir()
     if repo is None:
-        raise FileNotFoundError("C68-Anomaly pipeline not found")
+        raise FileNotFoundError("no anomaly training checkout found")
 
     with _LOCK:
-        if _STATE["threshold"] is None:
-            _STATE["threshold"], _STATE["source"] = None, None
-        app, threshold, source = _build(repo)
-        _STATE.update({"threshold": threshold, "source": source, "repo": str(repo)})
+        app, threshold, source, hybrid_error = _build(repo)
+        _STATE.update({"threshold": threshold, "source": source,
+                       "repo": str(repo), "hybrid": hybrid_error})
 
     x = load(scenario) if samples is None else np.asarray(samples)
-    window = int(app.window_size)
     scores: List[float] = []
     flags: List[int] = []
     events: List[Dict[str, Any]] = []
@@ -192,29 +260,39 @@ def replay(scenario: Scenario, samples: Optional[np.ndarray] = None
             scores.append(round(last, 4))
             flags.append(int(bool(result.get("is_anomalous"))))
             if result.get("anomaly_detected") and result.get("event") is not None:
-                captured = result["event"]
-                for conv in ("model_dump", "dict", "to_dict"):
-                    if not isinstance(captured, dict) and hasattr(captured, conv):
-                        captured = getattr(captured, conv)()
-                if isinstance(captured, dict):
-                    event_id = result.get("event_id") or captured.get("event_id") or f"ANOM-{t}"
-                    events.append({"event_id": event_id, "start_tick": t,
-                                   "confirm_tick": t, "end_tick": None,
-                                   "evidence": {**captured, "event_id": event_id},
-                                   "values": [round(float(v), 5) for v in row]})
+                built = _as_event(result["event"], t, row, result.get("event_id"))
+                if built:
+                    events.append(built)
+        # A finite replay usually ends while the event is still open; closing it
+        # is what produces the report (and therefore the L1 verdict).
+        tail = app.finalize_stream() if hasattr(app, "finalize_stream") else None
+        if tail:
+            built = _as_event(tail, len(x) - 1, x[-1])
+            if built and built["event_id"] not in {e["event_id"] for e in events}:
+                events.append(built)
 
-    notices = [f"Trained LSTM-AE (C68-Anomaly) at threshold {threshold:.3f} "
-               f"({source})."]
+    diagnoses = [e["diagnosis"] for e in events if e.get("diagnosis")]
+    notices = [f"Trained LSTM-AE + hybrid L1 at threshold {threshold:.3f} ({source})."]
+    if hybrid_error:
+        notices.append("L1 classifier unavailable in this checkout; "
+                       "events carry no diagnosis.")
+    detector = {"backend": "external",
+                "name": "trained LSTM-AE + CVA (TEPApp)",
+                "threshold": round(threshold, 4),
+                "threshold_source": source,
+                "window": int(app.window_size), "stride": int(app.stride),
+                "confirm": 3, "calibration": source,
+                "diagnosis": "classifier+menu_rule" if not hybrid_error else None,
+                "diagnosis_source": str(getattr(getattr(app, "hybrid", None),
+                                                "artifacts", "") or "") or None,
+                "repo": str(repo)}
     return {
         "scores": scores,
         "anomalous": flags,
         "events": events,
-        "detector": {"backend": "external",
-                     "name": "trained LSTM-AE (C68-Anomaly TEPApp)",
-                     "threshold": round(threshold, 4),
-                     "threshold_source": source,
-                     "window": window, "stride": int(app.stride),
-                     "confirm": 3, "calibration": source},
+        "diagnosis": diagnoses[-1] if diagnoses else None,
+        "diagnoses": diagnoses,
+        "detector": detector,
         "notices": notices,
     }
 
@@ -223,4 +301,5 @@ def status() -> Dict[str, Any]:
     repo = repo_dir()
     return {"repo": str(repo) if repo else None,
             "threshold": _STATE.get("threshold"),
-            "threshold_source": _STATE.get("source")}
+            "threshold_source": _STATE.get("source"),
+            "hybrid_error": _STATE.get("hybrid")}
