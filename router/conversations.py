@@ -61,6 +61,35 @@ _IMAGE_REFERENCE = re.compile(
 )
 
 
+_IMAGE_ID = re.compile(r"\bimg_\d+\b", re.I)
+_IMAGE_IDENTITY = re.compile(
+    r"\b(?:which|what)\s+(?:image|photo|picture)\s+(?:are we|were we|is this|was that|did you|was analyzed)", re.I
+)
+_CONTINUATION = re.compile(
+    r"(?:and\s+)?(?:what|how)\s+about\s+(?:this(?: one)?|that(?: one)?|them|him|her|these|this image)[?!. ]*", re.I
+)
+_AUTH_REQUEST = re.compile(
+    r"^\s*(?:please\s+)?(?:judge|check|verify|assess|determine|test|evaluate)\s+(?:(?:h?their|its|his|her|the)\s+)?authenticity[.?! ]*$", re.I
+)
+
+
+def referenced_image_id(message: str) -> Optional[str]:
+    match = _IMAGE_ID.search(message)
+    return match.group().lower() if match else None
+
+
+def image_status_reply(message: str, asset: Optional["Asset"], *, explicitly_selected: bool) -> Optional[str]:
+    identity = _IMAGE_IDENTITY.search(message)
+    if asset is None:
+        return "There is no active image in this conversation." if identity else None
+    if not asset.usable and (explicitly_selected or identity or _IMAGE_REFERENCE.search(message)
+            or _CONTINUATION.fullmatch(message.strip()) or
+            re.search(r"\b(?:authenticity|authentic|fake|real|deepfake|verdict|image|photo|picture)\b", message, re.I)):
+        return (f"{asset.id} could not be analyzed ({asset.detail}). "
+                "Please attach a readable image within the upload limit.")
+    return None
+
+
 def is_verdict_question(message: str) -> bool:
     """True if message asks to explain or discuss a recorded forensic verdict."""
     low = (message or "").lower().strip()
@@ -187,6 +216,25 @@ class Conversation:
         self._asset_seq = 0
 
     # -- assets ---------------------------------------------------------
+    def routing_message(self, message: str, asset: Optional[Asset]) -> str:
+        if asset and asset.usable:
+            previous = self.turns[-1] if self.turns else {}
+            repeat_check = (_CONTINUATION.fullmatch(message.strip())
+                            and previous.get("kind") == "analysis"
+                            and previous.get("role") == "assistant")
+            if repeat_check or _AUTH_REQUEST.search(message):
+                return "Check whether this image is real or fake."
+        return message
+
+    def identity_reply(self, message: str, asset: Optional[Asset]) -> Optional[str]:
+        if not asset or not _IMAGE_IDENTITY.search(message):
+            return None
+        result = self.analysis_for_image(asset.id)
+        if result:
+            return (f"The selected image is {asset.id}. Its recorded verdict is "
+                    f"{result.verdict} ({result.confidence:.1%} confidence).")
+        return f"The selected image is {asset.id}. It has no recorded forensic verdict."
+
     def next_asset_id(self) -> str:
         while True:
             self._asset_seq += 1
@@ -223,7 +271,7 @@ class Conversation:
         return asset.id if asset else None
 
     # -- turns ----------------------------------------------------------
-    def add_turn(self, role: str, content: str, kind: str = "chat") -> None:
+    def add_turn(self, role: str, content: str, kind: str = "chat", image_id: Optional[str] = None) -> None:
         text = (content or "").strip()
         if not text:
             return
@@ -232,6 +280,7 @@ class Conversation:
             "content": text,
             "ts": round(time.time(), 3),
             "kind": kind,
+            "image_id": image_id,
         })
         self.updated_at = time.time()
 
@@ -241,11 +290,12 @@ class Conversation:
             if isinstance(turn, dict) and turn.get("content"):
                 self.add_turn(turn.get("role", "user"), str(turn["content"])[:2000])
 
-    def history(self, limit: int) -> List[Dict[str, str]]:
+    def history(self, limit: int, *, image_id: Optional[str] = None, scoped: bool = False) -> List[Dict[str, str]]:
         """Generation view: the real transcript, analysis turns included."""
         return [
             {"role": t["role"], "content": t["content"]}
             for t in self.turns[-limit:]
+            if not scoped or t.get("image_id") in (None, image_id)
         ]
 
     # -- analyses -------------------------------------------------------
@@ -296,6 +346,8 @@ class ConversationStore:
 
         with self._lock:
             conv = self.get_or_create(conversation_id)
+            if asset_id in conv.assets and conv.assets[asset_id].data != raw:
+                asset_id = conv.next_asset_id()
             asset = Asset(
                 id=asset_id or conv.next_asset_id(),
                 data=raw,
@@ -320,6 +372,8 @@ class ConversationStore:
                 except Exception as exc:  # corrupt / not an image
                     asset.availability, asset.support = "missing", "unsupported"
                     asset.detail = f"cannot decode image: {type(exc).__name__}"
+            if not asset.usable:
+                asset.data = b""
             conv.assets[asset.id] = asset
             if conv.active_image_id is None or asset.usable:
                 conv.active_image_id = asset.id
@@ -396,12 +450,12 @@ class ConversationStore:
         """History + saved analysis for the generator (separate from router context)."""
         with self._lock:
             conv = self.get_or_create(conversation_id)
-            target_id = image_id or conv.active_image_id
-            analysis = conv.analysis_for_image(target_id) if target_id else conv.last_analysis()
+            target_id = image_id
+            analysis = conv.analysis_for_image(target_id) if target_id else None
             has_analysis = analysis is not None
             is_followup = has_analysis and is_verdict_question(message)
             return {
-                "history": conv.history(GENERATION_HISTORY_TURNS),
+                "history": conv.history(GENERATION_HISTORY_TURNS, image_id=target_id, scoped=True),
                 "analysis": analysis,
                 "analysis_block": analysis.generation_block() if has_analysis else "",
                 "is_verdict_followup": is_followup,
@@ -414,6 +468,6 @@ class ConversationStore:
             return analysis
 
     def add_turn(self, conversation_id: str, role: str, content: str,
-                 kind: str = "chat") -> None:
+                 kind: str = "chat", image_id: Optional[str] = None) -> None:
         with self._lock:
-            self.get_or_create(conversation_id).add_turn(role, content, kind=kind)
+            self.get_or_create(conversation_id).add_turn(role, content, kind=kind, image_id=image_id)

@@ -49,7 +49,7 @@ from pydantic import BaseModel, Field
 from router import AdapterService, LayaRouter, TrainedLayaRouter
 from router.adapter_service import BusyError, TagSectioner, TagStripper
 from router.base import RouterDecision
-from router.conversations import Analysis, ConversationStore
+from router.conversations import Analysis, ConversationStore, image_status_reply, referenced_image_id
 from router.prompts import clean_adapter_directive
 
 logger = logging.getLogger(__name__)
@@ -511,7 +511,8 @@ def _chat_stream(req: ChatRequest):
     attached_asset = None
     attached_now = False
 
-    if req.image_base64:
+    named_id = referenced_image_id(req.message)
+    if req.image_base64 is not None:
         try:
             raw = base64.b64decode(req.image_base64)
         except Exception:
@@ -522,8 +523,8 @@ def _chat_stream(req: ChatRequest):
                                          media_type=req.media_type or "")
         attached_now = True
         store.set_active_image(conversation_id, attached_asset.id)
-    elif req.image_ids or req.active_image_id:
-        wanted = req.active_image_id or req.image_ids[0]
+    elif req.image_ids or req.active_image_id or named_id:
+        wanted = req.active_image_id or (req.image_ids[0] if req.image_ids else named_id)
         store.set_active_image(conversation_id, wanted)
         attached_asset = conv.assets.get(wanted)
         attached_now = bool(attached_asset and attached_asset.usable)
@@ -532,11 +533,28 @@ def _chat_stream(req: ChatRequest):
                    "support": attached_asset.support, "detail": attached_asset.detail}
                   if attached_asset else None)
 
+    selected = attached_asset or conv.active_asset()
+    reply = image_status_reply(req.message, selected, explicitly_selected=attached_asset is not None)
+    rejected = reply is not None and selected is not None and not selected.usable
+    reply = reply or conv.identity_reply(req.message, selected)
+    if reply:
+        image_id = selected.id if selected else None
+        store.add_turn(conversation_id, "user", req.message, image_id=image_id)
+        store.add_turn(conversation_id, "assistant", reply, image_id=image_id)
+        yield _sse({"event": "notice" if rejected else "token", "text": reply,
+                    "image_id": image_id, "conversation_id": conversation_id})
+        _log_chat_run({"conversation_id": conversation_id, "message": req.message,
+                       "active_image_id": image_id, "attachment": attachment,
+                       "outcome": "image-unusable" if rejected else "image-status"})
+        yield _sse({"event": "done", "conversation_id": conversation_id})
+        return
+
     # -- routing: LAYA's five-field state, or the explicit thinking pin --
     state = store.routing_payload(
         conversation_id, req.message, attached_asset=attached_asset,
         attached_now=attached_now)
     target_asset = attached_asset or conv.assets.get(state["active_image_id"])
+    state["message"] = conv.routing_message(req.message, target_asset)
     if req.deep_thinking:
         decision = RouterDecision(
             router="manual", task="reasoning", confidence=1.0,
@@ -634,9 +652,9 @@ def _chat_stream(req: ChatRequest):
                         stub=req.stub):
                     kind = chunk.get("event")
                     if kind == "verdict":
-                        verdict = chunk
-                        log_record["verdict"] = chunk
-                        yield _sse(chunk)
+                        verdict = {**chunk, "image_id": target_asset.id}
+                        log_record["verdict"] = verdict
+                        yield _sse(verdict)
                     elif kind in ("thinking", "token", "notice"):
                         if kind != "notice":
                             visible.append(chunk.get("text", ""))
@@ -644,6 +662,10 @@ def _chat_stream(req: ChatRequest):
                                     "text": chunk.get("text", "")})
                     elif kind == "generation_receipt":
                         gen["generation"] = chunk
+                if not verdict.get("verdict"):
+                    yield _sse({"event": "notice", "text": f"No verdict was produced for {target_asset.id}."})
+                    yield _sse({"event": "done", "conversation_id": conversation_id})
+                    return
                 explanation = "".join(visible).strip()
                 result = Analysis(
                     id=f"an_{len(conv.analyses) + 1}",
@@ -706,10 +728,11 @@ def _chat_stream(req: ChatRequest):
 
     # One persistent transcript, updated only after the answer exists.
     turn_kind = "analysis" if task == "deepfake" else "chat"
-    store.add_turn(conversation_id, "user", req.message, kind=turn_kind)
+    image_id = target_asset.id if target_asset else None
+    store.add_turn(conversation_id, "user", req.message, kind=turn_kind, image_id=image_id)
     answer = "".join(answer_parts).strip()
     if answer:
-        store.add_turn(conversation_id, "assistant", answer, kind=turn_kind)
+        store.add_turn(conversation_id, "assistant", answer, kind=turn_kind, image_id=image_id)
     _log_chat_run({**log_record, "outcome": "answered", **gen,
                    "conversation_id": conversation_id})
     yield _sse({"event": "done", "conversation_id": conversation_id})

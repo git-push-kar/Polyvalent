@@ -334,3 +334,41 @@ def test_return_to_portrait_after_topic_change():
     missing = turn("Is this image fake?", active_image_id="missing")
     assert "verdict" not in missing
     assert missing.get("adapter", {}).get("task") != "deepfake"
+
+
+def test_two_images_keep_verdicts_and_upload_errors_separate(monkeypatch):
+    import router.conversations as conversations
+
+    conv_id = "two-image-handoff"
+    def turn(message, **kwargs):
+        events = chat_stream(message, conversation_id=conv_id, **kwargs)
+        assert events[-1]["event"] == "done"
+        return {event["event"]: event for event in events}
+
+    image = _sample_png_b64()
+    first = turn("Is this face real or fake?", image_base64=image)
+    assert first["analysis_saved"]["image_id"] == "img_1"
+    second = turn("what about them", image_base64=image)
+    assert second["adapter"]["task"] == "deepfake"
+    assert second["analysis_saved"]["image_id"] == "img_2"
+    assert turn("judge htheir authenticity")["analysis_saved"]["image_id"] == "img_2"
+    assert "img_2" in turn("which image are we talking about?")["token"]["text"]
+
+    monkeypatch.setattr(conversations, "MAX_IMAGE_BYTES", 32)
+    rejected = turn("what about them", image_base64=image)
+    assert "exceeds" in rejected["notice"]["text"]
+    assert "adapter" not in rejected
+    for prompt in ("judge htheir authenticity", "which image are we talking about?",
+                   "what about that? img_3"):
+        result = turn(prompt)
+        assert "img_3" in result["notice"]["text"]
+        assert "adapter" not in result
+        assert "analysis_saved" not in result
+
+    earlier = turn("which image are we talking about? img_1")
+    assert "img_1" in earlier["token"]["text"]
+    store = srv.get_conversations()
+    assert store.get(conv_id).analysis_for_image("img_3") is None
+    ctx = store.generation_context(conv_id, image_id="img_3")
+    assert not ctx["analysis_block"]
+    assert all("Deepfake analysis of" not in row["content"] for row in ctx["history"])
