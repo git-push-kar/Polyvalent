@@ -43,6 +43,8 @@ body nav.tabs button[aria-selected=true] {background:var(--panel-2)}
 .chat-bar {display:flex;align-items:center;gap:12px;min-height:48px;padding:8px 28px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600}
 #chatTitle {white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #railToggle {display:none}
+/* Keep both columns centered in the same space when the transcript scrolls. */
+#view-chat #log, #view-chat .composer-wrap {scrollbar-gutter:stable}
 #view-chat #log {display:flex;flex-direction:column;padding:20px clamp(14px,4vw,64px);min-height:0}
 #view-chat .thread {max-width:860px;width:100%;gap:24px}
 #view-chat .thread:has(.empty:not([style*="none"])) {margin-block:auto}
@@ -60,7 +62,7 @@ body nav.tabs button[aria-selected=true] {background:var(--panel-2)}
 #view-chat .chip b {font-size:15px;letter-spacing:-.02em}
 #view-chat .chip span {display:flex;justify-content:space-between;align-items:center;margin-top:4px}
 #view-chat .chip strong {font-size:14px;font-weight:400}
-#view-chat .composer-wrap {padding:10px clamp(14px,4vw,64px) 22px;background:var(--bg)}
+#view-chat .composer-wrap {overflow:hidden;padding:10px clamp(14px,4vw,64px) 22px;background:var(--bg)}
 #view-chat .composer {max-width:860px;padding:12px 15px;border-radius:20px;box-shadow:0 4px 18px #00000009;background:var(--panel)}
 #view-chat .composer-row {display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px}
 #view-chat #box {grid-column:1/-1;grid-row:1;width:100%;background:transparent;padding:5px 4px 12px}
