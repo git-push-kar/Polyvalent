@@ -533,34 +533,25 @@ class AdapterService:
             ]
         yield verdict_event
 
-        # Multi-face reasoning: if per_face with multiple faces, generate reasoning for ALL faces!
-        # Winner (decisive face) is generated first so immediate feedback is preserved.
-        if routing_path == "per_face" and len(classified_items) > 1:
-            other_faces = [it for it in classified_items if it["id"] != winner["id"]]
-            targets = [winner] + sorted(other_faces, key=lambda x: x["id"])
-        else:
-            targets = [winner]
-
-        for target in targets:
-            f_id = target.get("id", 1)
-            is_pri = (f_id == winner["id"])
-            yield {
-                "event": "face_start",
-                "face_id": f_id,
-                "verdict": target["verdict"],
-                "confidence": round(target["confidence"], 4),
-                "is_primary": is_pri,
-            }
-            yield from self._stream_item_reasoning(
-                wrapper=wrapper,
-                tokenizer=tokenizer,
-                device=device,
-                it=target,
-                is_primary=is_pri,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                repetition_penalty=repetition_penalty,
-            )
+        # All faces have verdicts; additional explanations are served on demand.
+        f_id = winner.get("id", 1)
+        yield {
+            "event": "face_start",
+            "face_id": f_id,
+            "verdict": winner["verdict"],
+            "confidence": round(winner["confidence"], 4),
+            "is_primary": True,
+        }
+        yield from self._stream_item_reasoning(
+            wrapper=wrapper,
+            tokenizer=tokenizer,
+            device=device,
+            it=winner,
+            is_primary=True,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            repetition_penalty=repetition_penalty,
+        )
 
     def _stream_item_reasoning(self, wrapper, tokenizer, device, it: Dict[str, Any],
                                is_primary: bool, max_new_tokens: int = 512,

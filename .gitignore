@@ -108,3 +108,7 @@ Desktop.ini
 .env.*.local
 secrets.yaml
 secrets.json
+
+# Local live paper account
+data/finance_paper/live_account.json
+data/finance_paper/live_account.tmp

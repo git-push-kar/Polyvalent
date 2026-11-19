@@ -535,7 +535,6 @@
         <button class="btn" id="fin-live-refresh" style="display:none;">Refresh quotes</button>
         <button class="btn primary" id="fin-live-decide" style="display:none;">Run model decision</button>
         <button class="btn" id="fin-live-settle" style="display:none;">Settle today</button>
-        <button class="btn" id="fin-live-advance" style="display:none;">Advance live day</button>
       </div>
       <div class="fin-status" id="fin-status" role="status"><span class="dot"></span><span id="fin-statusText">Preparing your portfolio…</span></div>
       <div class="fin-progress" aria-label="Simulation progress"><i id="fin-progress" style="width:0%"></i></div>
@@ -1184,6 +1183,27 @@ function verdictCard(ui, ev) {
 
   ui.bubble.insertBefore(card, ui.bubble.firstChild);
 
+  if (path !== 'per_face' && !ev.explanation && (ev.quick_verdict || ui.analysisId)) {
+    const explain = document.createElement('button');
+    explain.type = 'button';
+    explain.className = 'btn';
+    explain.textContent = 'Explain this verdict';
+    card.append(explain);
+    explain.onclick = async () => {
+      explain.disabled = true;
+      try {
+        await sse('/chat/reason_face', { conversation_id: ui.chatId, image_id: ui.imageId,
+          analysis_id: ui.analysisId, face_id: primaryId }, event => {
+          if (event.event === 'notice') throw Error(event.text);
+          if (event.event === 'thinking') explain.textContent = 'Generating explanation…';
+          if (event.event === 'token') { ui.text += event.text; renderAnswer(ui); }
+          if (event.event === 'face_done') explain.hidden = true;
+        });
+      } catch (err) { explain.textContent = 'Retry explanation'; explain.title = err.message; }
+      finally { explain.disabled = false; }
+    };
+  }
+
   // Set up multi-face state and interactive selection if in per_face mode
   if (path === 'per_face' && faces.length > 0) {
     ui.ans.style.display = 'none';
@@ -1195,7 +1215,7 @@ function verdictCard(ui, ev) {
         text: f.reasoning || (ui.analysisId && Number(f.face_id) === Number(primaryId) ? ev.explanation : '') || '',
         thinking: '',
         done: Boolean(f.reasoning),
-        status: f.reasoning ? 'ready' : (!ui.analysisId && Number(f.face_id) === Number(primaryId) ? 'generating' : 'pending'),
+        status: f.reasoning ? 'ready' : (!ui.analysisId && !ev.quick_verdict && Number(f.face_id) === Number(primaryId) ? 'generating' : 'pending'),
         verdict: f.verdict,
         confidence: f.confidence,
         hotspots: f.hotspots,
@@ -1417,7 +1437,7 @@ async function ask() {
   try {
     const forced = deepThink;  // captured per request, so a mid-stream toggle cannot mix
     if (!conversationId) conversationId = 'chat_' + (crypto.randomUUID ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-'));
-    const body = { message, conversation_id: conversationId, history: chatHistory.slice(-6), max_new_tokens: 768 };
+    const body = { message, conversation_id: conversationId, history: chatHistory.slice(-6), quick_verdict: true, max_new_tokens: 768 };
     if (forced) body.deep_thinking = true;
     if (img) body.image_base64 = img.b64;
     await sse('/chat/stream', body, ev => {

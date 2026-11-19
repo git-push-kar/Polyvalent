@@ -4,7 +4,7 @@ Supports three distinct simulation modes:
   Mode 1: Final Benchmark Replay (Jan 2025 – Jan 2026) -> Replays primary test set via PaperEngine.
   Mode 2: 2026 YTD History Replay (Jan 1, 2026 – Yesterday) -> Replays the daily actions & rebalances that built the current portfolio.
   Mode 3: Live Real-Time Market Trading (Today's Live Session) -> Continues from yesterday's pre-existing portfolio,
-          takes decisions in real time using live market data (yfinance), and settles into persistent storage
+          takes decisions in real time using live market data (Yahoo Finance), and settles into persistent storage
           so tomorrow continues seamlessly from today's closing state.
 """
 
@@ -12,7 +12,10 @@ import os
 import sys
 import json
 import time
-import shutil
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 import datetime
 import threading
 from pathlib import Path
@@ -24,6 +27,8 @@ DATA_DIR = DEMO_ROOT / 'data' / 'finance_paper'
 STORE_PATH = DATA_DIR / 'live_portfolio_store.json'
 BACKUP_PATH = DATA_DIR / 'live_portfolio_store.backup.json'
 CACHE_PATH = DATA_DIR / 'live_market_cache.npz'
+
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 from finance.cash_execution import execute
 
@@ -103,42 +108,36 @@ class LiveMarketService:
             print(f"[LiveMarketService] Warning: Could not fetch online quotes ({e}). Using local cache.")
             return CACHE_PATH if CACHE_PATH.exists() else None
 
+    @staticmethod
+    def fetch_symbol(symbol):
+        url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + quote(symbol, safe='') + '?range=6mo&interval=1d'
+        request = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urlopen(request, timeout=6) as response:
+            result = json.load(response)['chart']['result'][0]
+        meta = result['meta']
+        price = float(meta['regularMarketPrice'])
+        if meta['symbol'] != symbol or meta['currency'] != 'INR' or not np.isfinite(price) or price <= 0:
+            raise ValueError('Invalid market quote for ' + symbol)
+        closes = {datetime.datetime.fromtimestamp(ts, IST).date().isoformat(): float(value)
+                  for ts, value in zip(result['timestamp'], result['indicators']['quote'][0]['close'])
+                  if value is not None and np.isfinite(value) and value > 0}
+        timestamp = int(meta['regularMarketTime'])
+        date = datetime.datetime.fromtimestamp(timestamp, IST).date().isoformat()
+        closes[date] = price
+        return dict(price=price, timestamp=timestamp, date=date, closes=closes)
+
     @classmethod
-    def fetch_realtime_quotes(cls) -> Dict[str, Dict[str, float]]:
-        """Fetch real-time / intraday quotes for all 49 Nifty tickers."""
-        quotes = {}
-        try:
-            import yfinance as yf
-            df = yf.download(YF_TICKERS, period='2d', interval='1d', group_by='ticker', progress=False)
-            for t, yt in zip(TICKERS_49, YF_TICKERS):
-                try:
-                    ticker_series = df[yt]['Close'].dropna()
-                    if len(ticker_series) >= 2:
-                        prev_close = float(ticker_series.iloc[-2])
-                        curr_price = float(ticker_series.iloc[-1])
-                    elif len(ticker_series) == 1:
-                        prev_close = curr_price = float(ticker_series.iloc[-1])
-                    else:
-                        prev_close = curr_price = 100.0
-                    change_pct = (curr_price / prev_close - 1.0) if prev_close > 0 else 0.0
-                    quotes[t] = {
-                        'price': curr_price,
-                        'prev_close': prev_close,
-                        'change_pct': change_pct
-                    }
-                except Exception:
-                    quotes[t] = {'price': 100.0, 'prev_close': 100.0, 'change_pct': 0.0}
-        except Exception as e:
-            print(f"[LiveMarketService] Realtime quote error: {e}. Falling back to cached prices.")
+    def fetch_realtime_quotes(cls):
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            quotes = dict(zip(TICKERS_49, pool.map(cls.fetch_symbol, YF_TICKERS)))
+        # Some daily series omit yesterday while today's quote is still provisional.
+        if CACHE_PATH.exists():
             panel = cls.load_panel()
-            last_p = panel['prices'][-1]
-            prev_p = panel['prices'][-2] if len(panel['prices']) > 1 else last_p
-            for i, t in enumerate(TICKERS_49):
-                quotes[t] = {
-                    'price': float(last_p[i]),
-                    'prev_close': float(prev_p[i]),
-                    'change_pct': float(last_p[i] / max(prev_p[i], 1e-4) - 1.0)
-                }
+            for i, ticker in enumerate(panel['tickers']):
+                entry = quotes[ticker]
+                for date, price in zip(panel['dates'][-90:], panel['prices'][-90:, i]):
+                    if date < entry['date'] and np.isfinite(price) and price > 0:
+                        entry['closes'].setdefault(str(date), float(price))
         return quotes
 
     @classmethod
@@ -269,14 +268,7 @@ class YTDReplaySession:
 # MODE 3: LIVE REAL-TIME MARKET TRADING (Today's Live Session)
 # ==============================================================================
 class LiveRealtimeSession:
-    """Active live trading session continuing from yesterday's settled close.
-    
-    1. Ingests today's live real-time market data from yfinance.
-    2. Marks the portfolio to market in real time.
-    3. Triggers InternVL3-2B + LoRA RL to evaluate today's live market and execute decisions with reasoning.
-    4. Settles today's session into persistent storage (live_portfolio_store.json) so tomorrow
-       resumes from today's closing state.
-    """
+    """Mark paper positions at timestamped quotes and settle one allocation per day."""
 
     def __init__(self, key="live_market_session", capital=100000.0):
         self.key = key
@@ -290,129 +282,161 @@ class LiveRealtimeSession:
 
     def _load_settled_portfolio(self):
         """Load baseline portfolio state settled as of yesterday's close."""
-        if not STORE_PATH.exists():
-            mgr = LivePortfolioManager(self.capital)
-            mgr._load_or_bootstrap()
-
-        with open(STORE_PATH, "r", encoding="utf-8") as f:
-            self.settled_state = json.load(f)
-
-        self.settled_date = self.settled_state['asof_date']
-        self.settled_equity = float(self.settled_state['equity'])
-        self.settled_cash_weight = float(self.settled_state['cash_weight'])
-        self.settled_weights = np.array(self.settled_state['weights'], dtype=np.float64)
-
-        # Initialize live values
-        self.live_equity = self.settled_equity
-        self.live_weights = self.settled_weights.copy()
-        self.live_cash = self.settled_cash_weight * self.settled_equity
-        self.refresh_quotes()
+        self.ledger = Path(os.getenv('POLYVL_LIVE_ACCOUNT') or DATA_DIR / 'live_account.json')
+        ledger = self.ledger
+        today = datetime.datetime.now(IST).date()
+        source = ledger if ledger.exists() else STORE_PATH
+        state = json.loads(source.read_text(encoding='utf-8')) if source.exists() else {}
+        self.account_note = ''
+        if not state or state['asof_date'] > today.isoformat():
+            self.account_note = 'Fresh cash account. The previous ledger is missing or future-dated.'
+            prior = (today - datetime.timedelta(days=1)).isoformat()
+            state = dict(asof_date=prior, initial_date=today.isoformat(), equity=self.capital,
+                         capital=self.capital, cash_weight=1., weights=[0.] * len(self.tickers))
+        self.settled_state = state
+        self.capital = float(state['capital'])
+        self.settled_date = state['asof_date']
+        self.is_settled_today = self.settled_date == today.isoformat()
+        self.settled_equity = self.live_equity = float(state['equity'])
+        self.live_weights = np.array(state['weights'], dtype=float)
+        self.live_cash = self.live_equity * state['cash_weight']
+        stored_units = state.get("shares")
+        self.units = np.array([stored_units[t] for t in self.tickers], dtype=np.int64) if stored_units is not None else None
+        self.quote_error = 'Refresh quotes to load market data.'
+        self.quote_date = ''
+        self.quote_time = 0
 
     def refresh_quotes(self):
-        """Fetch today's real-time quotes from yfinance and mark portfolio to market."""
         with self.lock:
-            self.live_quotes = LiveMarketService.fetch_realtime_quotes()
-            # Calculate mark to market equity
-            stock_value = 0.0
-            for i, t in enumerate(self.tickers):
-                q = self.live_quotes.get(t, {})
-                rel = 1.0 + q.get('change_pct', 0.0)
-                stock_value += (self.settled_weights[i] * self.settled_equity) * rel
-
-            self.live_equity = self.live_cash + stock_value
+            try:
+                quotes = LiveMarketService.fetch_realtime_quotes()
+                dates = {q['date'] for q in quotes.values()}
+                if len(dates) != 1:
+                    raise ValueError('Constituents have different trading dates.')
+                quote_date = dates.pop()
+                if quote_date < self.settled_date:
+                    raise ValueError('Quotes precede the settled account.')
+                prices = np.array([quotes[t]['price'] for t in self.tickers])
+                if self.units is None:
+                    reference = self.settled_state.get('closing_prices', {})
+                    units = np.zeros(len(prices), dtype=np.int64)
+                    fractional_cash = 0.
+                    for i, t in enumerate(self.tickers):
+                        if self.live_weights[i]:
+                            basis = reference.get(t) or quotes[t]['closes'].get(self.settled_date)
+                            if not basis:
+                                raise ValueError('Missing settlement price for ' + t)
+                            value = self.live_equity * self.live_weights[i]
+                            units[i] = int(np.floor(value / basis + 1e-12))
+                            fractional_cash += value - units[i] * basis
+                    self.units = units
+                    self.live_cash += fractional_cash
+                    if fractional_cash > .005:
+                        self.account_note = f"Legacy fractional holdings converted to whole shares. INR {fractional_cash:,.2f} returned to cash at settlement prices."
+                values = self.units * prices
+                self.live_equity = float(self.live_cash + values.sum())
+                self.live_weights = values / self.live_equity
+                self.live_quotes = quotes
+                self.quote_time = min(q['timestamp'] for q in quotes.values())
+                self.quote_date = quote_date
+                self.quote_error = ''
+            except Exception as exc:
+                self.quote_error = 'Quotes unavailable: ' + str(exc)
             return self.snapshot()
 
-    def execute_live_decision(self):
-        """Run InternVL3-2B + LoRA RL inference on current live market quotes."""
+    def decision_blocker(self):
+        today = datetime.datetime.now(IST).date().isoformat()
+        if self.quote_error:
+            return self.quote_error
+        if self.quote_date != today or not LiveMarketService.get_market_status()[1]:
+            return 'Trading paused outside the current NSE session.'
+        if not -60 <= time.time() - self.quote_time <= 1200:
+            return 'Quotes are older than 20 minutes. Refresh before trading.'
+        if self.settled_date >= today:
+            return 'Already settled for today.'
+        return ''
+
+    def execute_live_decision(self, service):
+        from finance.policy import predict
         with self.lock:
-            from finance.policy import predict
-
-            # Prepare live state observation
-            n_stocks = len(self.tickers)
-            live_rel = np.array([
-                1.0 + self.live_quotes.get(t, {}).get('change_pct', 0.0)
-                for t in self.tickers
-            ], dtype=np.float64)
-
-            # Duck-typed account
-            class _LiveAcc:
-                pass
-            acc = _LiveAcc()
-            panel_data = LiveMarketService.load_panel()
-
-            class _PanelAdapter:
-                def __init__(self, pdata):
-                    self.prices = pdata['prices']
-                    self.dates = pdata['dates']
-                    self.tickers = pdata['tickers']
-            acc.panel = _PanelAdapter(panel_data)
-            acc.index = len(panel_data['dates']) - 1
-            acc.cash = self.live_cash / max(self.live_equity, 1.0)
-            acc.equity = self.live_equity
-            acc.weights = self.live_weights
-
-            try:
-                target_w, receipt = predict(account=acc)
-            except Exception as e:
-                print(f"[LiveRealtimeSession] Model predict fallback: {e}")
-                target_w = self.live_weights.copy()
-                receipt = {'mode': 'hold', 'adapter': 'internvl3_state_rl'}
-
+            blocker = self.decision_blocker()
+            if blocker:
+                raise ValueError(blocker)
+            if self.today_activity:
+                return self.snapshot()
+            dates = sorted(set.intersection(*(set(q['closes']) for q in self.live_quotes.values())))
+            if len(dates) < 61 or dates[-1] != self.quote_date:
+                raise ValueError('Insufficient aligned price history for 60-session signals.')
+            prices = np.array([[self.live_quotes[t]['closes'][d] for t in self.tickers] for d in dates])
+            panel = SimpleNamespace(prices=prices, dates=dates, tickers=self.tickers)
+            acc = SimpleNamespace(panel=panel, index=len(dates), cash=self.live_cash / self.live_equity,
+                                  equity=self.live_equity, weights=self.live_weights)
+            with service.lease('internvl3_state_rl'):
+                target_w, receipt = predict(service, account=acc, allocation_evidence=True)
+            blocker = self.decision_blocker()
+            if blocker:
+                raise ValueError(blocker)
             old_eq = self.live_equity
-            cash_w = self.live_cash / max(self.live_equity, 1.0)
-            res = execute(self.live_weights, cash_w, target_w, live_rel)
-
-            traded = old_eq * (res.post_fee_stock_notional - self.live_weights)
+            fee_bps = 10.
+            budget = execute(self.live_weights, acc.cash, target_w, np.ones(len(self.tickers)), fee_bps=fee_bps)
+            price = prices[-1]
+            next_units = np.floor(old_eq * budget.post_fee_stock_notional / price + 1e-12).astype(np.int64)
+            delta = next_units - self.units
+            traded = delta * price
+            gross_traded = float(np.abs(traded).sum())
+            fee = gross_traded * fee_bps / 10000.
+            cash = float(self.live_cash - traded.sum() - fee)
+            if cash < -1e-7:
+                raise ValueError('Insufficient cash for whole-share orders and fees.')
+            cash = max(0., cash)
+            values = next_units * price
+            equity = float(cash + values.sum())
             rationales = receipt.get('rationales', []) if isinstance(receipt, dict) else []
 
-            today_str = datetime.date.today().strftime('%Y-%m-%d')
+            today_str = datetime.datetime.now(IST).date().isoformat()
             activity = {
                 'id': len(self.settled_state.get('activities', [])),
                 'execution_date': today_str,
-                'signal_date': self.settled_date,
-                'probabilities': [0.25] * 4,
-                'strategy_names': ['Top-15 Conviction Pick', 'Momentum Quality', 'Low Volatility', 'Cash Reserve'],
+                'signal_date': self.quote_date,
+                'quote_time': self.quote_time,
                 'previous_weights': self.live_weights.tolist(),
                 'target_weights': target_w.tolist(),
-                'strategy_contributions': np.zeros((4, n_stocks)).tolist(),
                 'pre_trade_equity': float(old_eq),
-                'fee': float(old_eq * res.trading_cost),
-                'turnover': float(res.turnover),
+                'fee': fee,
+                'turnover': gross_traded / old_eq,
+                'whole_shares': True,
                 'model_receipt': receipt,
                 'rationales': rationales,
-                'trades': [{'ticker': t, 'amount': float(amount),
+                'trades': [{'ticker': t, 'amount': float(amount), 'shares': int(abs(delta[i])),
+                            'price': float(price[i]), 'executed_weight': float(values[i] / equity),
                             'previous_weight': float(self.live_weights[i]), 'target_weight': float(target_w[i])}
-                           for i, (t, amount) in enumerate(zip(self.tickers, traded)) if abs(amount) > 0.005]
+                           for i, (t, amount) in enumerate(zip(self.tickers, traded)) if delta[i] != 0]
             }
 
             self.today_activity = activity
-            self.live_weights = res.stock_weights
-            self.live_cash = res.cash_weight * old_eq
-            self.live_equity = old_eq * (1.0 + res.net_return)
+            self.live_weights = values / equity
+            self.live_equity = equity
+            self.live_cash = cash
+            self.units = next_units
             return self.snapshot()
 
     def settle_today(self, target_date=None):
-        """Commit today's live session into persistent storage (live_portfolio_store.json).
+        """Commit today's live session into the paper account ledger.
         
         Advances the permanent portfolio baseline so that tomorrow continues from this closing state.
         """
         with self.lock:
-            # Create safety backup
-            if STORE_PATH.exists():
-                shutil.copy2(STORE_PATH, BACKUP_PATH)
-
-            today_str = target_date or datetime.date.today().strftime('%Y-%m-%d')
-            if today_str <= self.settled_date:
-                # If testing on the same day or weekend, advance to next business day
-                d = datetime.date.fromisoformat(self.settled_date)
-                next_d = d + datetime.timedelta(days=1)
-                while next_d.weekday() >= 5: # Skip Sat/Sun
-                    next_d += datetime.timedelta(days=1)
-                today_str = next_d.strftime('%Y-%m-%d')
-
-            history = self.settled_state.get('history', [])
-            activities = self.settled_state.get('activities', [])
-            returns = self.settled_state.get('returns', [])
+            today_str = datetime.datetime.now(IST).date().isoformat()
+            if target_date and target_date != today_str:
+                raise ValueError('Only the current trading date can be settled.')
+            if self.settled_date == today_str:
+                return self.snapshot()
+            if (self.quote_error or self.quote_date != today_str or not self.today_activity
+                    or self.today_activity['execution_date'] != today_str):
+                raise ValueError('A decision and quotes from today are required for settlement.')
+            history = list(self.settled_state.get('history', []))
+            activities = list(self.settled_state.get('activities', []))
+            returns = list(self.settled_state.get('returns', []))
 
             day_ret = (self.live_equity / max(self.settled_equity, 1.0)) - 1.0
             peak = max(self.settled_state.get('peak', self.capital), self.live_equity)
@@ -421,8 +445,6 @@ class LiveRealtimeSession:
             history.append({
                 'date': today_str,
                 'equity': float(self.live_equity),
-                'untrained': float(self.settled_state.get('ref_untrained', {}).get('equity', self.capital) * (1.0 + day_ret)),
-                'buy_hold': float(self.settled_state.get('ref_buy_hold', {}).get('equity', self.capital) * (1.0 + day_ret)),
                 'drawdown': drawdown
             })
 
@@ -453,14 +475,16 @@ class LiveRealtimeSession:
                 'updated_at': datetime.datetime.now().isoformat()
             }
 
-            with open(STORE_PATH, 'w', encoding='utf-8') as f:
-                json.dump(updated_state, f, indent=2)
+            updated_state['shares'] = dict(zip(self.tickers, self.units.tolist()))
+            updated_state['closing_prices'] = {t: q['price'] for t, q in self.live_quotes.items()}
+            ledger = self.ledger
+            pending = ledger.with_suffix('.tmp')
+            pending.write_text(json.dumps(updated_state, allow_nan=False), encoding='utf-8')
+            os.replace(pending, ledger)
 
             self.settled_state = updated_state
             self.settled_date = today_str
             self.settled_equity = float(self.live_equity)
-            self.settled_cash_weight = cash_w
-            self.settled_weights = self.live_weights.copy()
             self.is_settled_today = True
 
             print(f"[LiveRealtimeSession] Successfully settled session {today_str}. Total sessions: {len(history)}.")
@@ -469,8 +493,8 @@ class LiveRealtimeSession:
     def snapshot(self):
         with self.lock:
             s = self.settled_state
-            market_label, is_open = LiveMarketService.get_market_status()
-            today_str = datetime.date.today().strftime('%Y-%m-%d')
+            _, is_open = LiveMarketService.get_market_status()
+            today_str = datetime.datetime.now(IST).date().isoformat()
 
             holdings = []
             for i, (t, w) in enumerate(zip(self.tickers, self.live_weights)):
@@ -480,8 +504,8 @@ class LiveRealtimeSession:
                     'value': float(w * self.live_equity),
                     'weight': float(w),
                     'price': q.get('price', 0.0),
-                    'change_pct': q.get('change_pct', 0.0),
-                    'cumulative_market_pnl': 0.0
+                    'quote_timestamp': q.get('timestamp'),
+                    'shares': int(self.units[i]) if self.units is not None else None
                 })
 
             rets = s.get('returns', [])
@@ -516,7 +540,7 @@ class LiveRealtimeSession:
                 'intraday_pct': intraday_pct,
                 'cash': self.live_cash,
                 'net_return': self.live_equity / self.capital - 1.0,
-                'fees': s.get('fees', 0.0),
+                'fees': s.get('fees', 0.0) + (self.today_activity['fee'] if self.today_activity and not self.is_settled_today else 0.),
                 'maximum_drawdown': max_dd,
                 'sharpe': sharpe,
                 'sessions': len(s.get('history', [])),
@@ -528,8 +552,11 @@ class LiveRealtimeSession:
                 'activities': activities,
                 'currency': 'INR',
                 'model': 'InternVL3-2B-State-RL',
-                'market_status': market_label,
-                'is_market_open': is_open,
+                'market_status': (self.decision_blocker() or 'Market quotes available') + (' | Oldest quote ' + datetime.datetime.fromtimestamp(self.quote_time, IST).strftime('%d %b %H:%M IST') if self.quote_time else ''),
+                'account_note': self.account_note,
+                'can_decide': not self.decision_blocker() and not self.today_activity,
+                'can_settle': bool(self.today_activity and self.today_activity['execution_date'] == today_str and self.quote_date == today_str and not self.quote_error and self.settled_date < today_str),
+                'is_market_open': bool(is_open and not self.quote_error and self.quote_date == today_str and 0 <= time.time() - self.quote_time <= 1200),
                 'is_settled_today': self.is_settled_today,
                 'settle_note': settle_note,
                 'updated_at': datetime.datetime.now().isoformat()
@@ -551,7 +578,7 @@ def get_ytd_session(capital=100000.0) -> YTDReplaySession:
 def get_live_realtime_session(capital=100000.0) -> LiveRealtimeSession:
     global _live_session
     with _manager_lock:
-        if _live_session is None or _live_session.capital != capital:
+        if _live_session is None or (_live_session.today_activity and _live_session.today_activity['execution_date'] != datetime.datetime.now(IST).date().isoformat()):
             _live_session = LiveRealtimeSession(capital=capital)
         return _live_session
 

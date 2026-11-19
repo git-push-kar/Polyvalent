@@ -57,7 +57,7 @@ def test_mode2_ytd_history_replay(client):
     assert data_reb["sessions"] >= data_adv["sessions"]
 
 
-def test_mode3_live_realtime_trading(client):
+def test_mode3_live_realtime_trading(client, live_account, tmp_path):
     """Verify Mode 3: Live Real-Time Market Trading & Day Settlement."""
     res = client.post("/finance/paper/sessions", json={"capital": 100000.0, "mode": "live"})
     assert res.status_code == 200, res.text
@@ -82,10 +82,15 @@ def test_mode3_live_realtime_trading(client):
     data_dec = res_dec.json()
     assert data_dec["equity"] > 0
 
-    # Test day settlement into permanent storage (forced date to avoid altering baseline date)
-    dummy_date = "2026-11-30"
-    res_set = client.post("/finance/paper/live/settle", json={"target_date": dummy_date})
-    assert res_set.status_code == 200
-    data_set = res_set.json()
-    assert data_set["settled_date"] == dummy_date
-    assert data_set["is_settled_today"] is True
+    assert data_dec['equity'] == pytest.approx(data['equity'] - data_dec['fees'])
+    assert client.post('/finance/paper/live/decide').json()['equity'] == data_dec['equity']
+    assert client.post('/finance/paper/live/refresh').json()['equity'] == pytest.approx(data_dec['equity'])
+    assert client.post('/finance/paper/live/settle', json={'target_date': '2100-01-01'}).status_code == 409
+    settled = client.post('/finance/paper/live/settle').json()
+    assert settled['settled_date'] == settled['date']
+    assert settled['is_settled_today']
+    assert client.post('/finance/paper/live/settle').json()['sessions'] == settled['sessions']
+    reopened = LiveRealtimeSession().refresh_quotes()
+    assert reopened['equity'] == pytest.approx(settled['equity'])
+    assert not reopened['can_decide']
+    assert (tmp_path / 'live_account.json').exists()

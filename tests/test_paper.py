@@ -84,8 +84,10 @@ def test_duplicate_advance_is_rejected(monkeypatch, tmp_path):
     import api.server as server
     _, predict = reference()
     monkeypatch.setattr(api, 'ASSESSMENT_MARKER', tmp_path/'absent.json')
-    monkeypatch.setattr(api, 'predict', lambda service: predict())
-    monkeypatch.setattr(server, 'get_service', lambda: None)
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    monkeypatch.setattr(api, 'predict', lambda service, account: predict())
+    monkeypatch.setattr(server, 'get_service', lambda: SimpleNamespace(lease=lambda task: nullcontext()))
     c = TestClient(app)
     j = c.post('/finance/paper/sessions', json={'capital': 100000}).json()
     key = j['session_id']

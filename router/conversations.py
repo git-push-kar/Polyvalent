@@ -88,8 +88,17 @@ _AUTH_REQUEST = re.compile(
 )
 
 
+_AUTH_PRONOUN = re.compile(
+    r"\b(?:is|are|does|do)\s+(?:he|she|it|they|this|that)\s+"
+    r"(?:(?:look|seem|appear)\s+(?:to\s+be\s+)?)?"
+    r"(?:authentic|real|fake|ai[- ]generated|manipulated)(?:\s+or\s+(?:real|fake))?[?!. ]*$",
+    re.I,
+)
+
+
 def expects_image(message: str) -> bool:
-    return bool(_IMAGE_REFERENCE.search(message) or _VISUAL_REQUEST.search(message))
+    return bool(_IMAGE_REFERENCE.search(message) or _VISUAL_REQUEST.search(message)
+                or _AUTH_REQUEST.search(message) or _AUTH_PRONOUN.search(message))
 
 
 def image_status_reply(message: str, asset: Optional["Asset"], *, explicitly_selected: bool) -> Optional[str]:
@@ -188,11 +197,11 @@ class Analysis:
             "[Recorded deepfake analysis — already computed, do not re-run]",
             f"image: {self.image_id}",
             f"verdict: {self.verdict}",
-            f"classifier confidence: {self.confidence:.4f}",
+            f"classifier confidence: {self.confidence:.1%}",
         ]
         if self.faces_analyzed > 1:
             lines.append(
-                f"faces evaluated: {self.faces_analyzed} detected in image (primary face analyzed: #{self.faces[0].get('face_id', 1) if self.faces else 1})"
+                f"faces evaluated: {self.faces_analyzed} detected in image (primary face analyzed: #{self.primary_face_id or 1})"
             )
         lines.extend([
             f"hotspot regions: {self.hotspots or 'not reported'}",
@@ -240,7 +249,7 @@ class Conversation:
             repeat_check = (_CONTINUATION.fullmatch(message.strip())
                             and previous.get("kind") == "analysis"
                             and previous.get("role") == "assistant")
-            if repeat_check or _AUTH_REQUEST.search(message):
+            if repeat_check or _AUTH_REQUEST.search(message) or _AUTH_PRONOUN.search(message):
                 return "Check whether this image is real or fake."
         return message
 
@@ -539,7 +548,8 @@ class ConversationStore:
             recent = None
             if attached_asset is None:
                 recent = conv.usable_asset()
-                if recent and not expects_image(message or ""):
+                if recent and not (expects_image(message or "")
+                                   or re.search(r"\b(?:real or fake|fake or real)\b", message or "", re.I)):
                     if len(conv.turns) - recent.added_turn > RECENT_IMAGE_TURNS:
                         recent = None
             target_asset = attached_asset if (attached_now and attached_asset) else recent

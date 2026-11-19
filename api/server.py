@@ -34,6 +34,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import asdict
@@ -477,6 +478,7 @@ class ChatRequest(BaseModel):
     temperature: float = 0.0
     repetition_penalty: float = 1.1  # mild loop-breaker for chat
     stub: Optional[bool] = None
+    quick_verdict: bool = False
     deep_thinking: bool = False  # UI toggle: pin the message to the reasoning (LR) adapter
 
 
@@ -552,11 +554,11 @@ def _chat_turn(req, store, conv):
     # Resolve relative to the newly uploaded image, or to the current selection.
     named_id, reference_error = conv.resolve_image(req.message)
     request_id = req.active_image_id or (req.image_ids[0] if req.image_ids else None)
-    if reference_error and not request_id:
+    if reference_error:
         yield _sse({"event": "notice", "text": reference_error})
         yield _sse({"event": "done", "conversation_id": conversation_id})
         return
-    wanted = named_id if attached_asset else request_id or named_id
+    wanted = named_id or (request_id if not attached_asset else None)
     if wanted and (not attached_asset or wanted != attached_asset.id):
         store.set_active_image(conversation_id, wanted)
         attached_asset = conv.assets.get(wanted)
@@ -656,7 +658,7 @@ def _chat_turn(req, store, conv):
     # When explaining a recorded verdict, supply recorded analysis without
     # inviting a second invented visual forensic read.
     if task == "general":
-        if attached_now and attached_asset and attached_asset.usable:
+        if attached_now and attached_asset and attached_asset.usable and not is_verdict_followup:
             attach_pixels = True
             pixel_bytes = attached_asset.data
         elif target_asset and target_asset.usable and not is_verdict_followup:
@@ -694,9 +696,11 @@ def _chat_turn(req, store, conv):
                         stub=req.stub):
                     kind = chunk.get("event")
                     if kind == "verdict":
-                        verdict = {**chunk, "image_id": target_asset.id}
+                        verdict = {**chunk, "image_id": target_asset.id, "quick_verdict": req.quick_verdict}
                         log_record["verdict"] = verdict
                         yield _sse(verdict)
+                        if req.quick_verdict:
+                            break
                     elif kind in ("thinking", "token", "notice", "face_start", "face_done"):
                         if kind == "token" and chunk.get("is_primary", True):
                             visible.append(chunk.get("text", ""))
@@ -743,6 +747,13 @@ def _chat_turn(req, store, conv):
                             "verdict": result.verdict,
                             "confidence": result.confidence,
                             "faces_analyzed": result.faces_analyzed})
+            elif task == "general" and analysis and re.fullmatch(
+                r"\s*(?:please\s+)?(?:explain|show|repeat|summari[sz]e)\s+(?:(?:the|that|this)\s+)?"
+                r"(?:verdict|result|analysis)(?:\s+(?:for|of)\s+img_\d+)?[.!?\s]*", req.message, re.I
+            ):
+                summary = analysis.history_text()
+                answer_parts.append(summary)
+                yield _sse({"event": "token", "text": summary})
             else:
                 prompt_message = (clean_adapter_directive(req.message)
                                   if task == "reasoning" else req.message)
@@ -911,8 +922,11 @@ def _reason_face_stream(req: FaceReasonRequest):
                         analysis = next((a for a in conv.analyses if a.id == req.analysis_id
                                          and a.image_id == req.image_id), None)
                         face = next((f for f in analysis.faces if f["face_id"] == req.face_id), None) if analysis else None
-                        if face and chunk.get("text"):
-                            face["reasoning"] = chunk["text"]
+                        if analysis and chunk.get("text"):
+                            if face:
+                                face["reasoning"] = chunk["text"]
+                            if req.face_id == (analysis.primary_face_id or 1):
+                                analysis.explanation = chunk["text"]
                             store.save(conv.id)
                 yield _sse(chunk)
         yield _sse({"event": "done"})

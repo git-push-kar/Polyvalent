@@ -10,7 +10,12 @@
 const $=id=>document.getElementById('fin-'+id), money=x=>new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:2}).format(x),pct=x=>(100*x).toFixed(2)+'%';
 let state=null,session=null,busy=false,playing=false,limit=6,selected=null,playback=0,currentMode='benchmark';
 const el=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;};
-async function api(path,method='GET',body){const r=await fetch('/finance/paper'+path,{method,headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});let j=await r.json();if(!r.ok)throw Error(j.detail||'Request failed');return j;}
+async function api(path,method='GET',body){
+  const r=await fetch('/finance/paper'+path,{method,headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+  const j=await r.json();
+  if(!r.ok)throw Error(j.detail||'Request failed');
+  return j;
+}
 function status(text,working=false,thinking=false){
   const label=$('statusText');
   label.textContent=text;
@@ -30,13 +35,12 @@ function controls(){
   if($('live-refresh')) $('live-refresh').style.display = isLive ? 'inline-block' : 'none';
   if($('live-decide')) $('live-decide').style.display = isLive ? 'inline-block' : 'none';
   if($('live-settle')) $('live-settle').style.display = isLive ? 'inline-block' : 'none';
-  if($('live-advance')) $('live-advance').style.display = isLive ? 'inline-block' : 'none';
+  $('settings').closest('details').hidden = isLive;
 
   if(isLive){
     if($('live-refresh')) $('live-refresh').disabled = busy;
-    if($('live-decide')) $('live-decide').disabled = busy;
-    if($('live-settle')) $('live-settle').disabled = busy;
-    if($('live-advance')) $('live-advance').disabled = busy;
+    if($('live-decide')) $('live-decide').disabled = busy || !state?.can_decide;
+    if($('live-settle')) $('live-settle').disabled = busy || !state?.can_settle;
   }
 
   for(const id of ['day','rebalance'])$(id).disabled=busy||!state||state.finished||playing;
@@ -52,6 +56,10 @@ function render(){
   const isLive = (currentMode === 'live');
   const isYTD = (currentMode === 'ytd');
 
+  $('compare').closest('label').hidden=isLive;
+  $('chart').parentElement.querySelector('.legend').hidden=isLive;
+  $('holdings').closest('table').querySelector('th:last-child').textContent=isLive?'Quote':'Market P&L¹';
+  $('cash').nextElementSibling.hidden=isLive;
   $('equity').textContent=money(state.equity);
   $('drawdown').textContent=pct(state.maximum_drawdown);
   $('fees').textContent=money(state.fees);
@@ -68,7 +76,7 @@ function render(){
     $('gain').className='v '+(pnl>=0?'positive':'negative');
     $('return').textContent=pct(pnlPct)+' today · Overall '+pct(state.net_return);
 
-    $('sessionInfo').textContent = 'Previous close: '+(state.settled_date||state.initial_date)+' · '+(state.market_status||'Live quotes');
+    $('sessionInfo').textContent = [state.account_note || 'Last settlement '+state.settled_date, state.market_status].join(' · ');
     $('resetNote').textContent = 'Reloads the pre-existing portfolio state from storage.';
   } else if(isYTD){
     $('date').textContent='YTD · '+state.date;
@@ -100,7 +108,12 @@ function render(){
 function renderChart(){
   const svg=$('chart');svg.replaceChildren();const theme=getComputedStyle(document.body),color=name=>theme.getPropertyValue(name).trim();
   const ns='http://www.w3.org/2000/svg',add=(tag,attrs,text)=>{const e=document.createElementNS(ns,tag);for(const[k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;svg.append(e);return e;};
-  const hist=[{date:state.initial_date,equity:state.capital,untrained:state.capital,buy_hold:state.capital},...state.history],keys=$('compare').checked?['untrained','buy_hold','equity']:['equity'];
+  const hist=[{date:state.initial_date,equity:state.capital,untrained:state.capital,buy_hold:state.capital},...state.history];
+  if(currentMode==='live'){
+    const latest=hist.at(-1);
+    if(latest.date!==state.date || latest.equity!==state.equity)hist.push({date:state.date,equity:state.equity});
+  }
+  const keys=currentMode!=='live' && $('compare').checked?['untrained','buy_hold','equity']:['equity'];
   const values=hist.flatMap(h=>keys.map(k=>h[k]));
   let lo=Math.min(...values),hi=Math.max(...values),pad=Math.max((hi-lo)*.12,state.capital*.005);
   lo-=pad;hi+=pad;
@@ -120,7 +133,7 @@ function renderHoldings(){
   $('holdings').replaceChildren();
   for(const h of rows){
     const tr=el('tr');
-    tr.append(el('td',h.ticker.replace('.NS','')),el('td',money(h.value)),el('td',pct(h.weight)),el('td',money(h.cumulative_market_pnl),h.cumulative_market_pnl>=0?'positive':'negative'));
+    tr.append(el('td',h.ticker.replace('.NS','')+(Number.isInteger(h.shares)?' · '+h.shares+' sh':'')),el('td',money(h.value)),el('td',pct(h.weight)),currentMode==='live' ? el('td',h.price?money(h.price):'Unavailable') : el('td',money(h.cumulative_market_pnl),h.cumulative_market_pnl>=0?'positive':'negative'));
     $('holdings').append(tr);
   }
   if(!rows.length){const tr=el('tr'),td=el('td',state.sessions?'No matching holdings':'Your portfolio starts in cash.');td.colSpan=4;tr.append(td);$('holdings').append(tr);}
@@ -172,7 +185,7 @@ function renderDecision(){
     rBox.style.padding = '10px 14px';
     rBox.style.background = 'rgba(74, 144, 226, 0.08)';
     rBox.style.borderLeft = '3px solid var(--accent)';
-    rBox.append(el('h4', 'Model rationale'));
+    rBox.append(el('h4', a.quote_time ? 'Allocation evidence' : 'Model rationale'));
     for(const r of a.rationales){
       const p = el('p', `${r.ticker.replace('.NS', '')}: "${r.rationale}"`);
       p.style.fontSize = '12px';
@@ -182,29 +195,39 @@ function renderDecision(){
     root.append(rBox);
   }
 
-  root.append(el('h3','Learned strategy mix'));
-  const mix=el('div',undefined,'mix');
-  a.strategy_names.forEach((name,i)=>{
-    const row=el('div',undefined,'row');
-    row.append(el('span',name),el('span',pct(a.probabilities[i])));
-    const bar=el('div',undefined,'bar'),fill=el('i');
-    fill.style.width=100*a.probabilities[i]+'%';
-    bar.append(fill);mix.append(row,bar);
-  });
-  root.append(mix,el('p','The target blends these strategy weights. Price movement and updated lagged inputs change the stock allocations.','muted'));
+  if(currentMode !== 'live' && a.strategy_names?.length){
+    root.append(el('h3','Learned strategy mix'));
+    const mix=el('div',undefined,'mix');
+    a.strategy_names.forEach((name,i)=>{
+      const row=el('div',undefined,'row');
+      row.append(el('span',name),el('span',pct(a.probabilities[i])));
+      const bar=el('div',undefined,'bar'),fill=el('i');
+      fill.style.width=100*a.probabilities[i]+'%';
+      bar.append(fill);mix.append(row,bar);
+    });
+    root.append(mix,el('p','The target blends these strategy weights. Price movement and updated lagged inputs change the stock allocations.','muted'));
+  }
   const scroll=el('div',undefined,'detail-trades'),table=el('table'),head=el('thead'),hr=el('tr');
-  for(const s of ['Stock','Action / amount','Target'])hr.append(el('th',s));
+  for(const s of (a.whole_shares?['Stock','Order','Price','Amount','Model target']:['Stock','Action / amount','Target']))hr.append(el('th',s));
   head.append(hr);table.append(head);
   const tb=el('tbody');
   for(const t of [...a.trades].sort((x,y)=>Math.abs(y.amount)-Math.abs(x.amount))){
     const tr=el('tr');
-    tr.append(el('td',t.ticker.replace('.NS','')),el('td',(t.amount>0?'Buy ':'Sell ')+money(Math.abs(t.amount))),el('td',pct(t.target_weight)));
+    const side=t.amount>0?'Buy ':'Sell ';
+    tr.append(el('td',t.ticker.replace('.NS','')));
+    if(a.whole_shares){
+      tr.append(el('td',side+t.shares+(t.shares===1?' share':' shares')),el('td',money(t.price)),el('td',money(Math.abs(t.amount))));
+    }else{
+      tr.append(el('td',side+money(Math.abs(t.amount))));
+    }
+    tr.append(el('td',pct(t.target_weight)));
     tb.append(tr);
   }
   table.append(tb);scroll.append(table);root.append(scroll);
+  if(a.whole_shares && !a.trades.length)root.append(el('p','No whole-share trades at these prices.','muted'));
   const elapsed = a.model_receipt && a.model_receipt.elapsed_seconds !== undefined ? a.model_receipt.elapsed_seconds.toFixed(2)+'s · ' : '';
   const adapterName = (a.model_receipt && a.model_receipt.adapter) ? a.model_receipt.adapter : 'InternVL3-2B-State-RL';
-  root.append(el('div','Executed from actual adapter inference · '+elapsed+adapterName,'receipt'));
+  root.append(el('div',a.model_receipt?.mode === 'hold' ? 'Held after inference failure' : elapsed+adapterName,'receipt'));
 }
 
 async function advance(mode){
@@ -234,7 +257,7 @@ async function refreshLiveQuotes(){
   try{
     state=await api('/live/refresh','POST');
     render();
-    status('Live market data refreshed as of '+state.date+' · Portfolio marked to market');
+    status(state.market_status);
   }catch(e){
     error('Live refresh failed: '+e.message);
     status('Refresh failed');
@@ -251,7 +274,8 @@ async function decideLive(){
   try{
     state=await api('/live/decide','POST');
     render();
-    status('Target allocation ready');
+    selected=state.activities.at(-1)?.id;renderDecision();showRecord('decision');
+    status('Paper allocation recorded for '+state.date);
   }catch(e){
     error('Model live decision failed: '+e.message);
     status('Live decision failed');
@@ -272,23 +296,6 @@ async function settleLive(){
   }catch(e){
     error('Day settlement failed: '+e.message);
     status('Settlement failed');
-  }finally{
-    busy=false;controls();
-  }
-}
-
-async function advanceLive(){
-  if(busy||!state)return;
-  busy=true;error('');
-  status('Stepping live day forward on latest market data…',true);
-  controls();
-  try{
-    state=await api('/sessions/live_market_session/advance','POST',{mode:'day',expected_sessions:state.sessions});
-    render();
-    status('Live portfolio updated as of '+state.date);
-  }catch(e){
-    error(e.message);
-    status('Live update failed');
   }finally{
     busy=false;controls();
   }
@@ -315,7 +322,7 @@ async function start(capital=100000, mode=currentMode){
     if(mode === 'benchmark' || mode === 'historical') localStorage.setItem('finance-paper-session',session);
     selected=null;limit=6;showRecord('holdings');render();
 
-    status(mode === 'live' ? 'Live paper session ready' : 'Ready to replay');
+    status(mode === 'live' ? state.market_status : 'Ready to replay');
   }catch(e){
     error(e.message);
   }finally{
@@ -336,7 +343,6 @@ $('rebalance').onclick=()=>advance('rebalance');
 if($('live-refresh')) $('live-refresh').onclick=refreshLiveQuotes;
 if($('live-decide')) $('live-decide').onclick=decideLive;
 if($('live-settle')) $('live-settle').onclick=settleLive;
-if($('live-advance')) $('live-advance').onclick=advanceLive;
 
 $('compare').onchange=renderChart;
 $('search').oninput=renderHoldings;

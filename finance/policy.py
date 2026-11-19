@@ -95,7 +95,7 @@ def build_state_prompt(account):
     return text, offsets, sorted_indices, stock_features
 
 
-def predict(service=None, account=None):
+def predict(service=None, account=None, *, allocation_evidence=False):
     """Predict state-aware 49-asset allocations and generate decision rationales."""
     if service is not None and getattr(service, '_stub_backend', False):
         raise RuntimeError('Paper trading requires the real selected model; stubs are disabled')
@@ -126,7 +126,7 @@ def predict(service=None, account=None):
     weights_path = adapter_dir / 'adapter_model.safetensors'
     
     if service is not None and hasattr(service, 'select'):
-        if getattr(service.residency, 'current_task', None) != 'internvl3_state_rl' or service.residency.model is None:
+        if getattr(service.residency, 'task', None) != 'internvl3_state_rl' or service.residency.model is None:
             service.select('internvl3_state_rl')
         model = service.residency.model
         base = model.get_base_model() if hasattr(model, 'get_base_model') else model
@@ -206,6 +206,14 @@ def predict(service=None, account=None):
     for t in top_tickers:
         f = stock_features[t]
         t_clean = t.replace('.NS', '')
+        if allocation_evidence:
+            idx = account.panel.tickers.index(t)
+            if target_w[idx] > 0:
+                summary = (f"Target {target_w[idx]:.1%}. The adapter scored this stock {scores[idx]:.2f}/8. "
+                           f"Inputs: 20-session return {f['r20']:+.1f}%, 60-session return {f['r60']:+.1f}%, "
+                           f"and daily volatility {f['vol']:.1f}%.")
+                rationales.append({'ticker': t, 'features': f, 'rationale': summary})
+            continue
         rationale_prompt = (
             f"Stock {t_clean}: Ret20={f['r20']:+.1f}%, Ret60={f['r60']:+.1f}%, Vol={f['vol']:.1f}%, Price=Rs{f['price']:.0f}. "
             f"Explain concisely in one sentence why this stock was allocated capital based on its momentum and risk:"

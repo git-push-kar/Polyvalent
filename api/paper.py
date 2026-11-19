@@ -30,6 +30,7 @@ def config():
         **{k: m[k] for k in ['title', 'currency', 'first_return', 'last_return', 'adapter',
                              'rebalance_sessions', 'fee_bps', 'research_note', 'adapter_sha256']},
         'conversation_enabled': False,
+        'whole_share_live': True,
         'supported_modes': ['benchmark', 'ytd', 'live']
     }
 
@@ -78,9 +79,7 @@ def snapshot(key: str):
 @router.post('/sessions/{key}/advance')
 def advance(key: str, request: Advance):
     if key == 'live_market_session':
-        from finance.live_manager import get_live_realtime_session
-        mgr = get_live_realtime_session()
-        return {'session_id': key, **mgr.execute_live_decision()}
+        return live_decide()
 
     if key == 'ytd_history_session':
         from finance.live_manager import get_ytd_session
@@ -98,10 +97,9 @@ def advance(key: str, request: Advance):
                 raise HTTPException(409, 'The portfolio has already advanced. Reload its current state.')
             before = len(session.activities)
             def _call_predict():
-                try:
-                    return predict(get_service(), account=session)
-                except TypeError:
-                    return predict(get_service())
+                service = get_service()
+                with service.lease("internvl3_state_rl"):
+                    return predict(service, account=session)
 
             for _ in range(5 if request.mode == 'rebalance' else 1):
                 if not session.step(_call_predict):
@@ -128,7 +126,15 @@ def live_refresh():
 def live_decide():
     from finance.live_manager import get_live_realtime_session
     mgr = get_live_realtime_session()
-    return {'session_id': 'live_market_session', **mgr.execute_live_decision()}
+    from api.server import get_service
+    if ASSESSMENT_MARKER.exists():
+        raise HTTPException(503, 'Portfolio model assessment in progress.')
+    try:
+        return mgr.execute_live_decision(get_service())
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(503, f'Model decision unavailable: {exc}') from exc
 
 
 @router.post('/live/settle')
@@ -136,7 +142,10 @@ def live_settle(req: SettleRequest = SettleRequest()):
     from finance.live_manager import get_live_realtime_session
     mgr = get_live_realtime_session()
     target_d = req.target_date.strip() if req.target_date else None
-    return {'session_id': 'live_market_session', **mgr.settle_today(target_date=target_d)}
+    try:
+        return mgr.settle_today(target_date=target_d)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.delete('/sessions/{key}')

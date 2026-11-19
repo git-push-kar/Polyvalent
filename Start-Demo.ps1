@@ -14,6 +14,15 @@ if (-not (Test-Path $pyExe)) {
     }
 }
 
+Set-Location -LiteralPath $PSScriptRoot
+# This demo machine has room for the shared base and forensic wrapper together.
+if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+    $gpuMemory = nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | Select-Object -First 1
+    if ([int]$gpuMemory -ge 24000) {
+        $env:FINAL_ADAPTER_POLICY = 'keep'
+        $env:FINAL_LAYA_ROUTER_DEVICE = 'cuda'
+    }
+}
 Write-Host "Using Python: $pyExe" -ForegroundColor Cyan
 Write-Host "Launching web browser at http://127.0.0.1:8000 ..." -ForegroundColor Green
 Start-Process "http://127.0.0.1:8000"

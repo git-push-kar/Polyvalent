@@ -21,7 +21,7 @@ In this conclusive final deployment:
 3. **Three Distinct Simulation Modes in the Paper Trading Interface:**
    - **Mode 1: Final Benchmark Replay (Jan 2025 – Jan 2026)**: Replays the 270-session test run demonstrating our headline results.
    - **Mode 2: 2026 YTD History Replay (Jan 1, 2026 – Yesterday)**: Replays the 216 daily actions and 44 rebalances that built the current portfolio from ₹100k cash starting Jan 1, 2026 to yesterday's settled close.
-   - **Mode 3: Live Real-Time Market Trading (Today's Live Session)**: Continues from yesterday's pre-existing portfolio, ingests live real-time quotes via `yfinance` from the National Stock Exchange of India (NSE), executes live decisions with natural-language rationales, and settles today's run into persistent storage so tomorrow resumes seamlessly from today's closing state.
+   - **Mode 3. Live paper trading** uses timestamped Yahoo Finance quotes for the 49-stock universe and the shared InternVL3 state RL adapter.
 4. **Factual Natural-Language Reasoning:**
    - In addition to predicting continuous weights, the model autoregressively outputs factual natural-language investment rationales justifying why specific overweight/underweight asset rebalances were chosen based on 20-day/60-day momentum and rolling volatility.
 5. **Full Regression Verification:**
@@ -120,36 +120,17 @@ The simulation dashboard (`http://127.0.0.1:8765/#finance`) provides three disti
 * **Underlying Engine:** `YTDReplaySession` replaying records from `data/finance_paper/live_portfolio_store.json`.
 * **Value:** Complete auditability of every trade, rationales, and equity changes that occurred across 2026.
 
-### Mode 3: Live Real-Time Market Trading (Today's Live Session)
-* **Purpose:** Active forward trading session starting from yesterday's settled portfolio, executing decisions in real time using real-world market data.
-* **Live Feed:** Fetches real-time market quotes across all 49 Nifty constituent equities from the National Stock Exchange of India via `yfinance`.
-* **Live Mark-to-Market:** Computes real-time portfolio equity, today's intraday P&L, and unrealized price movements.
-* **Real-Time Model Action:** Users click **"🤖 Run Model Decision"** (`POST /finance/paper/live/decide`) to trigger the `InternVL3-2B + LoRA RL` policy to evaluate live prices + current holdings, calculate target whole-share rebalance trades, and stream real-time investment reasoning.
-* **Day-to-Day Persistent Settlement:** Clicking **"📌 Settle & Close Today"** (`POST /finance/paper/live/settle`) commits today's trades and settled closing prices into `live_portfolio_store.json`. This permanently advances the baseline so that tomorrow's live trading session resumes seamlessly from today's closing state.
+### Mode 3. Live paper trading
 
----
+Select **Live market · paper trading** to fetch all 49 INR quotes. **Refresh quotes** revalues the current holdings using their share quantities. The status shows the oldest constituent timestamp in IST. An unavailable feed, inconsistent trading dates, or quotes older than 20 minutes during market hours block a new decision.
 
-## 5. Day-to-Day Persistent Settlement Lifecycle
+**Run model decision** evaluates the latest quoted prices, aligned price history, cash and holdings. The trained adapter grades each stock. The allocation record gives the actual score, target weight, 20- and 60-session returns, and daily volatility for the largest positions. These figures describe the model inputs and output. They do not measure predictive accuracy. Live orders use whole shares. Each target position rounds down within its post-fee budget, unused rupees stay in cash, and fees apply to the actual traded value. Legacy fractional remainders convert to cash at settlement prices. It permits one decision per trading date.
 
-```
-Today's Live Trading Session (Nov 18, 2026):
-  1. Load pre-existing portfolio from live_portfolio_store.json
-  2. Pull real-time quotes via LiveMarketService (Yahoo Finance NSE feed)
-  3. Mark to market: Intraday P&L and live portfolio value displayed
-  4. Run Model Decision: InternVL3-2B evaluates live state -> executes trades -> generates rationales
-  5. Settle & Close Today: Commits today's close into live_portfolio_store.json (asof_date = 2026-11-18)
+## 5. Settlement and verification
 
-Tomorrow's Live Trading Session (Nov 19, 2026):
-  1. Automatically resumes from Nov 18 closing state (Cash, Holdings, Settled Equity)
-  2. Ingests Nov 19 real-time price action
-  3. Executes model rebalance trades for Nov 19
-  4. Settles Nov 19 into permanent storage (asof_date = 2026-11-19)
+**Settle today** saves the current paper valuation and reference prices. The ledger defaults to `data/finance_paper/live_account.json`; set `POLYVL_LIVE_ACCOUNT` to select another ledger. A new installation can initialize from a valid legacy account. A missing or future-dated baseline opens a cash account with a visible explanation. Subsequent settlements preserve the original replay file.
 
-Day After Tomorrow (Nov 20, 2026):
-  Resumes seamlessly from Nov 19 closing state without ever resetting or losing past history!
-```
-
----
+On November 19, 2026, an isolated CPU run used live quotes for all 49 stocks and the actual state RL adapter. It produced 17 paper trades and INR 22.07 in fees. The three reported evidence records matched the corresponding quoted prices. Equity reconciled with holdings plus cash and with pre-trade equity less fees. Duplicate decision and settlement requests left the account unchanged. This was an operational check of the paper simulator.
 
 ## 6. Verification & Test Suite Summary
 
@@ -179,4 +160,4 @@ pytest demo/tests -v
 * **Paper Trading Guide & UI Setup:** [`demo/PAPER_TRADING.md`](demo/PAPER_TRADING.md)
 * **Model Weights Release:** `E:\FINANCE_MODEL_WEIGHTS_RELEASE_20261118\`
 * **Master Reports Release:** `E:\FINANCE_REPORTS_20261118\`
-* **Active Live Portfolio Store:** [`demo/data/finance_paper/live_portfolio_store.json`](demo/data/finance_paper/live_portfolio_store.json)
+* The live paper account defaults to `data/finance_paper/live_account.json`.
